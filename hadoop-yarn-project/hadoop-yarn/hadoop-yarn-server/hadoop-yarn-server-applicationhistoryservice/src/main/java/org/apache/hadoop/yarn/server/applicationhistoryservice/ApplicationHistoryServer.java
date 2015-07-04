@@ -33,6 +33,7 @@ import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
@@ -45,6 +46,7 @@ import org.apache.hadoop.yarn.server.timeline.LeveldbTimelineStore;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineACLsManager;
+import org.apache.hadoop.yarn.server.timeline.security.TimelineAuthenticationFilter;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineAuthenticationFilterInitializer;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineDelegationTokenSecretManagerService;
 import org.apache.hadoop.yarn.server.timeline.webapp.CrossOriginFilterInitializer;
@@ -84,6 +86,7 @@ public class ApplicationHistoryServer extends CompositeService {
     secretManagerService = createTimelineDelegationTokenSecretManagerService(conf);
     addService(secretManagerService);
     timelineDataManager = createTimelineDataManager(conf);
+    addService(timelineDataManager);
 
     // init generic history service afterwards
     aclsManager = createApplicationACLsManager(conf);
@@ -104,9 +107,8 @@ public class ApplicationHistoryServer extends CompositeService {
     } catch(IOException ie) {
       throw new YarnRuntimeException("Failed to login", ie);
     }
-
-    startWebApp();
     super.serviceStart();
+    startWebApp();
   }
 
   @Override
@@ -152,6 +154,7 @@ public class ApplicationHistoryServer extends CompositeService {
         new CompositeServiceShutdownHook(appHistoryServer),
         SHUTDOWN_HOOK_PRIORITY);
       YarnConfiguration conf = new YarnConfiguration();
+      new GenericOptionsParser(conf, args);
       appHistoryServer.init(conf);
       appHistoryServer.start();
     } catch (Throwable t) {
@@ -212,6 +215,8 @@ public class ApplicationHistoryServer extends CompositeService {
 
   private void startWebApp() {
     Configuration conf = getConfig();
+    TimelineAuthenticationFilter.setTimelineDelegationTokenSecretManager(
+        secretManagerService.getTimelineDelegationTokenSecretManager());
     // Always load pseudo authentication filter to parse "user.name" in an URL
     // to identify a HTTP request's user in insecure mode.
     // When Kerberos authentication type is set (i.e., secure mode is turned on),
@@ -262,15 +267,12 @@ public class ApplicationHistoryServer extends CompositeService {
                           WebAppUtils.getAHSWebAppURLWithoutScheme(conf));
     LOG.info("Instantiating AHSWebApp at " + bindAddress);
     try {
-      AHSWebApp ahsWebApp = AHSWebApp.getInstance();
-      ahsWebApp.setApplicationHistoryManager(historyManager);
-      ahsWebApp.setTimelineDelegationTokenSecretManagerService(secretManagerService);
-      ahsWebApp.setTimelineDataManager(timelineDataManager);
       webApp =
           WebApps
             .$for("applicationhistory", ApplicationHistoryClientService.class,
                 ahsClientService, "ws")
-            .with(conf).at(bindAddress).start(ahsWebApp);
+            .with(conf).at(bindAddress).start(
+                new AHSWebApp(timelineDataManager, ahsClientService));
     } catch (Exception e) {
       String msg = "AHSWebApp failed to start.";
       LOG.error(msg, e);

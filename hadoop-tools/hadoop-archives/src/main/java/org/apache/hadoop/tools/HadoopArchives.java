@@ -68,6 +68,7 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 
+import com.google.common.base.Charsets;
 
 /**
  * a archive creation utility.
@@ -100,8 +101,8 @@ public class HadoopArchives implements Tool {
   /** the desired replication degree; default is 10 **/
   short repl = 10;
 
-  private static final String usage = "archive"
-  + " -archiveName NAME -p <parent path> [-r <replication factor>]" +
+  private static final String usage = "Usage: archive"
+  + " -archiveName <NAME>.har -p <parent path> [-r <replication factor>]" +
       "<src>* <dest>" +
   "\n";
   
@@ -237,7 +238,6 @@ public class HadoopArchives implements Tool {
       ArrayList<FileSplit> splits = new ArrayList<FileSplit>(numSplits);
       LongWritable key = new LongWritable();
       final HarEntry value = new HarEntry();
-      SequenceFile.Reader reader = null;
       // the remaining bytes in the file split
       long remaining = fstatus.getLen();
       // the count of sizes calculated till now
@@ -249,8 +249,7 @@ public class HadoopArchives implements Tool {
       long targetSize = totalSize/numSplits;
       // create splits of size target size so that all the maps 
       // have equals sized data to read and write to.
-      try {
-        reader = new SequenceFile.Reader(fs, src, jconf);
+      try (SequenceFile.Reader reader = new SequenceFile.Reader(fs, src, jconf)) {
         while(reader.next(key, value)) {
           if (currentCount + key.get() > targetSize && currentCount != 0){
             long size = lastPos - startPos;
@@ -266,9 +265,6 @@ public class HadoopArchives implements Tool {
         if (remaining != 0) {
           splits.add(new FileSplit(src, startPos, remaining, (String[])null));
         }
-      }
-      finally { 
-        reader.close();
       }
       return splits.toArray(new FileSplit[splits.size()]);
     }
@@ -348,15 +344,10 @@ public class HadoopArchives implements Tool {
    */
   private void writeTopLevelDirs(SequenceFile.Writer srcWriter, 
       List<Path> paths, Path parentPath) throws IOException {
-    //add all the directories 
-    List<Path> justDirs = new ArrayList<Path>();
+    // extract paths from absolute URI's
+    List<Path> justPaths = new ArrayList<Path>();
     for (Path p: paths) {
-      if (!p.getFileSystem(getConf()).isFile(p)) {
-        justDirs.add(new Path(p.toUri().getPath()));
-      }
-      else {
-        justDirs.add(new Path(p.getParent().toUri().getPath()));
-      }
+      justPaths.add(new Path(p.toUri().getPath()));
     }
     /* find all the common parents of paths that are valid archive
      * paths. The below is done so that we do not add a common path
@@ -372,7 +363,7 @@ public class HadoopArchives implements Tool {
     Path root = new Path(Path.SEPARATOR);
     for (int i = parentPath.depth(); i < deepest.depth(); i++) {
       List<Path> parents = new ArrayList<Path>();
-      for (Path p: justDirs) {
+      for (Path p: justPaths) {
         if (p.compareTo(root) == 0){
           //do nothing
         }
@@ -392,7 +383,7 @@ public class HadoopArchives implements Tool {
           }
         }
       }
-      justDirs = parents;
+      justPaths = parents;
     }
     Set<Map.Entry<String, HashSet<String>>> keyVals = allpaths.entrySet();
     for (Map.Entry<String, HashSet<String>> entry : keyVals) {
@@ -478,8 +469,13 @@ public class HadoopArchives implements Tool {
     Path outputPath = new Path(dest, archiveName);
     FileOutputFormat.setOutputPath(conf, outputPath);
     FileSystem outFs = outputPath.getFileSystem(conf);
-    if (outFs.exists(outputPath) || outFs.isFile(dest)) {
-      throw new IOException("Invalid Output: " + outputPath);
+    if (outFs.exists(outputPath)) {
+      throw new IOException("Archive path: "
+          + outputPath.toString() + " already exists");
+    }
+    if (outFs.isFile(dest)) {
+      throw new IOException("Destination " + dest.toString()
+          + " should be a directory but is a file");
     }
     conf.set(DST_DIR_LABEL, outputPath.toString());
     Path stagingArea;
@@ -746,7 +742,7 @@ public class HadoopArchives implements Tool {
         indexStream = fs.create(index);
         outStream = fs.create(masterIndex);
         String version = VERSION + " \n";
-        outStream.write(version.getBytes());
+        outStream.write(version.getBytes(Charsets.UTF_8));
         
       } catch(IOException e) {
         throw new RuntimeException(e);
@@ -765,7 +761,7 @@ public class HadoopArchives implements Tool {
       while(values.hasNext()) {
         Text value = values.next();
         String towrite = value.toString() + "\n";
-        indexStream.write(towrite.getBytes());
+        indexStream.write(towrite.getBytes(Charsets.UTF_8));
         written++;
         if (written > numIndexes -1) {
           // every 1000 indexes we report status
@@ -774,7 +770,7 @@ public class HadoopArchives implements Tool {
           endIndex = keyVal;
           String masterWrite = startIndex + " " + endIndex + " " + startPos 
                               +  " " + indexStream.getPos() + " \n" ;
-          outStream.write(masterWrite.getBytes());
+          outStream.write(masterWrite.getBytes(Charsets.UTF_8));
           startPos = indexStream.getPos();
           startIndex = endIndex;
           written = 0;
@@ -787,7 +783,7 @@ public class HadoopArchives implements Tool {
       if (written > 0) {
         String masterWrite = startIndex + " " + keyVal + " " + startPos  +
                              " " + indexStream.getPos() + " \n";
-        outStream.write(masterWrite.getBytes());
+        outStream.write(masterWrite.getBytes(Charsets.UTF_8));
       }
       // close the streams
       outStream.close();
@@ -855,8 +851,8 @@ public class HadoopArchives implements Tool {
           Path argPath = new Path(args[i]);
           if (argPath.isAbsolute()) {
             System.out.println(usage);
-            throw new IOException("source path " + argPath +
-                " is not relative  to "+ parentPath);
+            throw new IOException("Source path " + argPath +
+                " is not relative to "+ parentPath);
           }
           srcPaths.add(new Path(parentPath, argPath));
         }

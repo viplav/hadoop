@@ -43,6 +43,8 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
@@ -64,7 +66,6 @@ import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
-import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -77,15 +78,12 @@ import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
-import org.apache.hadoop.hdfs.server.namenode.INodeId;
-import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
@@ -379,6 +377,7 @@ public class TestFileCreation {
     Configuration conf = new HdfsConfiguration();
     SimulatedFSDataset.setFactory(conf);
     conf.setBoolean(DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY, false);
+
     final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).build();
     FileSystem fs = cluster.getFileSystem();
 
@@ -405,12 +404,10 @@ public class TestFileCreation {
         fs2.create(p, false);
         fail("Did not throw!");
       } catch (IOException abce) {
-        GenericTestUtils.assertExceptionContains("already being created by",
-            abce);
+        GenericTestUtils.assertExceptionContains("Failed to CREATE_FILE", abce);
       }
-      // NameNodeProxies' createNNProxyWithClientProtocol has 5 retries.
       assertCounter("AlreadyBeingCreatedExceptionNumOps",
-          6L, getMetrics(metricsName));
+          1L, getMetrics(metricsName));
       FSDataOutputStream stm2 = fs2.create(p, true);
       stm2.write(2);
       stm2.close();
@@ -538,7 +535,7 @@ public class TestFileCreation {
 
       // add one block to the file
       LocatedBlock location = client.getNamenode().addBlock(file1.toString(),
-          client.clientName, null, null, INodeId.GRANDFATHER_INODE_ID, null);
+          client.clientName, null, null, HdfsConstants.GRANDFATHER_INODE_ID, null);
       System.out.println("testFileCreationError2: "
           + "Added block " + location.getBlock());
 
@@ -589,7 +586,7 @@ public class TestFileCreation {
       createFile(dfs, f, 3);
       try {
         cluster.getNameNodeRpc().addBlock(f.toString(), client.clientName,
-            null, null, INodeId.GRANDFATHER_INODE_ID, null);
+            null, null, HdfsConstants.GRANDFATHER_INODE_ID, null);
         fail();
       } catch(IOException ioe) {
         FileSystem.LOG.info("GOOD!", ioe);
@@ -606,7 +603,8 @@ public class TestFileCreation {
    * Test that file leases are persisted across namenode restarts.
    */
   @Test
-  public void testFileCreationNamenodeRestart() throws IOException {
+  public void testFileCreationNamenodeRestart()
+      throws IOException, NoSuchFieldException, IllegalAccessException {
     Configuration conf = new HdfsConfiguration();
     final int MAX_IDLE_TIME = 2000; // 2s
     conf.setInt("ipc.client.connection.maxidletime", MAX_IDLE_TIME);
@@ -678,7 +676,7 @@ public class TestFileCreation {
 
       // restart cluster with the same namenode port as before.
       // This ensures that leases are persisted in fsimage.
-      cluster.shutdown();
+      cluster.shutdown(false, false);
       try {
         Thread.sleep(2*MAX_IDLE_TIME);
       } catch (InterruptedException e) {
@@ -690,7 +688,7 @@ public class TestFileCreation {
 
       // restart cluster yet again. This triggers the code to read in
       // persistent leases from fsimage.
-      cluster.shutdown();
+      cluster.shutdown(false, false);
       try {
         Thread.sleep(5000);
       } catch (InterruptedException e) {
@@ -705,11 +703,18 @@ public class TestFileCreation {
       // new blocks for files that were renamed.
       DFSOutputStream dfstream = (DFSOutputStream)
                                                  (stm.getWrappedStream());
-      dfstream.setTestFilename(file1.toString());
+
+      Field f = DFSOutputStream.class.getDeclaredField("src");
+      Field modifiersField = Field.class.getDeclaredField("modifiers");
+      modifiersField.setAccessible(true);
+      modifiersField.setInt(f, f.getModifiers() & ~Modifier.FINAL);
+      f.setAccessible(true);
+
+      f.set(dfstream, file1.toString());
       dfstream = (DFSOutputStream) (stm3.getWrappedStream());
-      dfstream.setTestFilename(file3new.toString());
+      f.set(dfstream, file3new.toString());
       dfstream = (DFSOutputStream) (stm4.getWrappedStream());
-      dfstream.setTestFilename(file4new.toString());
+      f.set(dfstream, file4new.toString());
 
       // write 1 byte to file.  This should succeed because the 
       // namenode should have persisted leases.
@@ -1206,8 +1211,8 @@ public class TestFileCreation {
         cluster.getNameNodeRpc()
             .complete(f.toString(), client.clientName, null, someOtherFileId);
         fail();
-      } catch(LeaseExpiredException e) {
-        FileSystem.LOG.info("Caught Expected LeaseExpiredException: ", e);
+      } catch(FileNotFoundException e) {
+        FileSystem.LOG.info("Caught Expected FileNotFoundException: ", e);
       }
     } finally {
       IOUtils.closeStream(dfs);

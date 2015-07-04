@@ -29,7 +29,6 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Options.ChecksumOpt;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
@@ -47,7 +46,7 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
       Configuration conf, String supportedScheme, boolean authorityRequired)
       throws IOException, URISyntaxException {
     super(theUri, supportedScheme, authorityRequired, 
-        FileSystem.getDefaultUri(conf).getPort());
+        theFsImpl.getDefaultPort());
     fsImpl = theFsImpl;
     fsImpl.initialize(theUri, conf);
     fsImpl.statistics = getStatistics();
@@ -129,6 +128,11 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
   }
 
   @Override
+  public FsStatus getFsStatus(final Path f) throws IOException {
+    return fsImpl.getStatus(f);
+  }
+
+  @Override
   public FsServerDefaults getServerDefaults() throws IOException {
     return fsImpl.getServerDefaults();
   }
@@ -162,6 +166,12 @@ public abstract class DelegateToFileSystem extends AbstractFileSystem {
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
     checkPath(f);
     return fsImpl.open(f, bufferSize);
+  }
+
+  @Override
+  public boolean truncate(Path f, long newLength) throws IOException {
+    checkPath(f);
+    return fsImpl.truncate(f, newLength);
   }
 
   @Override

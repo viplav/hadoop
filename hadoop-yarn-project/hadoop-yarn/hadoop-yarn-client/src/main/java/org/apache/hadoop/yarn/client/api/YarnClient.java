@@ -21,17 +21,23 @@ package org.apache.hadoop.yarn.client.api;
 import java.io.IOException;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
-import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest;
-import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationDeleteRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationDeleteResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationSubmissionRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationSubmissionResponse;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -39,16 +45,22 @@ import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerReport;
+import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
+import org.apache.hadoop.yarn.api.records.ReservationDefinition;
+import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
 import org.apache.hadoop.yarn.client.api.impl.YarnClientImpl;
+import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
 import org.apache.hadoop.yarn.exceptions.ApplicationIdNotProvidedException;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 
@@ -160,7 +172,6 @@ public abstract class YarnClient extends AbstractService {
    * <li>original tracking URL - set to "N/A"</li>
    * <li>resource usage report - all values are -1</li>
    * </ul>
-   * </p>
    * 
    * @param appId
    *          {@link ApplicationId} of the application that needs a report
@@ -173,20 +184,20 @@ public abstract class YarnClient extends AbstractService {
 
   /**
    * Get the AMRM token of the application.
-   * <p/>
+   * <p>
    * The AMRM token is required for AM to RM scheduling operations. For 
    * managed Application Masters Yarn takes care of injecting it. For unmanaged
    * Applications Masters, the token must be obtained via this method and set
    * in the {@link org.apache.hadoop.security.UserGroupInformation} of the
    * current user.
-   * <p/>
+   * <p>
    * The AMRM token will be returned only if all the following conditions are
    * met:
-   * <li>
-   *   <ul>the requester is the owner of the ApplicationMaster</ul>
-   *   <ul>the application master is an unmanaged ApplicationMaster</ul>
-   *   <ul>the application master is in ACCEPTED state</ul>
-   * </li>
+   * <ul>
+   *   <li>the requester is the owner of the ApplicationMaster</li>
+   *   <li>the application master is an unmanaged ApplicationMaster</li>
+   *   <li>the application master is in ACCEPTED state</li>
+   * </ul>
    * Else this method returns NULL.
    *
    * @param appId {@link ApplicationId} of the application to get the AMRM token
@@ -227,7 +238,7 @@ public abstract class YarnClient extends AbstractService {
    * {@link #getApplicationReport(ApplicationId)}.
    * </p>
    *
-   * @param applicationTypes
+   * @param applicationTypes set of application types you are interested in
    * @return a list of reports of applications
    * @throws YarnException
    * @throws IOException
@@ -247,7 +258,7 @@ public abstract class YarnClient extends AbstractService {
    * {@link #getApplicationReport(ApplicationId)}.
    * </p>
    *
-   * @param applicationStates
+   * @param applicationStates set of application states you are interested in
    * @return a list of reports of applications
    * @throws YarnException
    * @throws IOException
@@ -268,14 +279,40 @@ public abstract class YarnClient extends AbstractService {
    * {@link #getApplicationReport(ApplicationId)}.
    * </p>
    *
-   * @param applicationTypes
-   * @param applicationStates
+   * @param applicationTypes set of application types you are interested in
+   * @param applicationStates set of application states you are interested in
    * @return a list of reports of applications
    * @throws YarnException
    * @throws IOException
    */
   public abstract List<ApplicationReport> getApplications(
       Set<String> applicationTypes,
+      EnumSet<YarnApplicationState> applicationStates) throws YarnException,
+      IOException;
+
+  /**
+   * <p>
+   * Get a report (ApplicationReport) of Applications matching the given users,
+   * queues, application types and application states in the cluster. If any of
+   * the params is set to null, it is not used when filtering.
+   * </p>
+   *
+   * <p>
+   * If the user does not have <code>VIEW_APP</code> access for an application
+   * then the corresponding report will be filtered as described in
+   * {@link #getApplicationReport(ApplicationId)}.
+   * </p>
+   *
+   * @param queues set of queues you are interested in
+   * @param users set of users you are interested in
+   * @param applicationTypes set of application types you are interested in
+   * @param applicationStates set of application states you are interested in
+   * @return a list of reports of applications
+   * @throws YarnException
+   * @throws IOException
+   */
+  public abstract List<ApplicationReport> getApplications(Set<String> queues,
+      Set<String> users, Set<String> applicationTypes,
       EnumSet<YarnApplicationState> applicationStates) throws YarnException,
       IOException;
 
@@ -404,7 +441,7 @@ public abstract class YarnClient extends AbstractService {
    *          a report
    * @return application attempt report
    * @throws YarnException
-   * @throws {@link ApplicationAttemptNotFoundException} if application attempt
+   * @throws ApplicationAttemptNotFoundException if application attempt
    *         not found
    * @throws IOException
    */
@@ -416,7 +453,7 @@ public abstract class YarnClient extends AbstractService {
    * Get a report of all (ApplicationAttempts) of Application in the cluster.
    * </p>
    * 
-   * @param applicationId
+   * @param applicationId application id of the app
    * @return a list of reports for all application attempts for specified
    *         application.
    * @throws YarnException
@@ -439,7 +476,7 @@ public abstract class YarnClient extends AbstractService {
    *          {@link ContainerId} of the container that needs a report
    * @return container report
    * @throws YarnException
-   * @throws {@link ContainerNotFoundException} if container not found.
+   * @throws ContainerNotFoundException if container not found.
    * @throws IOException
    */
   public abstract ContainerReport getContainerReport(ContainerId containerId)
@@ -450,7 +487,7 @@ public abstract class YarnClient extends AbstractService {
    * Get a report of all (Containers) of ApplicationAttempt in the cluster.
    * </p>
    * 
-   * @param applicationAttemptId
+   * @param applicationAttemptId application attempt id
    * @return a list of reports of all containers for specified application
    *         attempts
    * @throws YarnException
@@ -474,4 +511,159 @@ public abstract class YarnClient extends AbstractService {
    */
   public abstract void moveApplicationAcrossQueues(ApplicationId appId,
       String queue) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to submit a new reservation to the
+   * {@code ResourceManager}.
+   * </p>
+   * 
+   * <p>
+   * The client packages all details of its request in a
+   * {@link ReservationSubmissionRequest} object. This contains information
+   * about the amount of capacity, temporal constraints, and gang needs.
+   * Furthermore, the reservation might be composed of multiple stages, with
+   * ordering dependencies among them.
+   * </p>
+   * 
+   * <p>
+   * In order to respond, a new admission control component in the
+   * {@code ResourceManager} performs an analysis of the resources that have
+   * been committed over the period of time the user is requesting, verify that
+   * the user requests can be fulfilled, and that it respect a sharing policy
+   * (e.g., {@code CapacityOverTimePolicy}). Once it has positively determined
+   * that the ReservationRequest is satisfiable the {@code ResourceManager}
+   * answers with a {@link ReservationSubmissionResponse} that includes a
+   * {@link ReservationId}. Upon failure to find a valid allocation the response
+   * is an exception with the message detailing the reason of failure.
+   * </p>
+   * 
+   * <p>
+   * The semantics guarantees that the {@link ReservationId} returned,
+   * corresponds to a valid reservation existing in the time-range request by
+   * the user. The amount of capacity dedicated to such reservation can vary
+   * overtime, depending of the allocation that has been determined. But it is
+   * guaranteed to satisfy all the constraint expressed by the user in the
+   * {@link ReservationDefinition}
+   * </p>
+   * 
+   * @param request request to submit a new Reservation
+   * @return response contains the {@link ReservationId} on accepting the
+   *         submission
+   * @throws YarnException if the reservation cannot be created successfully
+   * @throws IOException
+   * 
+   */
+  @Public
+  @Unstable
+  public abstract ReservationSubmissionResponse submitReservation(
+      ReservationSubmissionRequest request) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to update an existing Reservation. This is
+   * referred to as a re-negotiation process, in which a user that has
+   * previously submitted a Reservation.
+   * </p>
+   * 
+   * <p>
+   * The allocation is attempted by virtually substituting all previous
+   * allocations related to this Reservation with new ones, that satisfy the new
+   * {@link ReservationDefinition}. Upon success the previous allocation is
+   * atomically substituted by the new one, and on failure (i.e., if the system
+   * cannot find a valid allocation for the updated request), the previous
+   * allocation remains valid.
+   * </p>
+   * 
+   * @param request to update an existing Reservation (the
+   *          {@link ReservationUpdateRequest} should refer to an existing valid
+   *          {@link ReservationId})
+   * @return response empty on successfully updating the existing reservation
+   * @throws YarnException if the request is invalid or reservation cannot be
+   *           updated successfully
+   * @throws IOException
+   * 
+   */
+  @Public
+  @Unstable
+  public abstract ReservationUpdateResponse updateReservation(
+      ReservationUpdateRequest request) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by clients to remove an existing Reservation.
+   * </p>
+   * 
+   * @param request to remove an existing Reservation (the
+   *          {@link ReservationDeleteRequest} should refer to an existing valid
+   *          {@link ReservationId})
+   * @return response empty on successfully deleting the existing reservation
+   * @throws YarnException if the request is invalid or reservation cannot be
+   *           deleted successfully
+   * @throws IOException
+   * 
+   */
+  @Public
+  @Unstable
+  public abstract ReservationDeleteResponse deleteReservation(
+      ReservationDeleteRequest request) throws YarnException, IOException;
+  
+  /**
+   * <p>
+   * The interface used by client to get node to labels mappings in existing cluster
+   * </p>
+   * 
+   * @return node to labels mappings
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  public abstract Map<NodeId, Set<NodeLabel>> getNodeToLabels()
+      throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by client to get labels to nodes mapping
+   * in existing cluster
+   * </p>
+   *
+   * @return node to labels mappings
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  public abstract Map<NodeLabel, Set<NodeId>> getLabelsToNodes()
+      throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by client to get labels to nodes mapping
+   * for specified labels in existing cluster
+   * </p>
+   *
+   * @param labels labels for which labels to nodes mapping has to be retrieved
+   * @return labels to nodes mappings for specific labels
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  public abstract Map<NodeLabel, Set<NodeId>> getLabelsToNodes(
+      Set<String> labels) throws YarnException, IOException;
+
+  /**
+   * <p>
+   * The interface used by client to get node labels in the cluster
+   * </p>
+   *
+   * @return cluster node labels collection
+   * @throws YarnException
+   * @throws IOException
+   */
+  @Public
+  @Unstable
+  public abstract List<NodeLabel> getClusterNodeLabels()
+      throws YarnException, IOException;
 }

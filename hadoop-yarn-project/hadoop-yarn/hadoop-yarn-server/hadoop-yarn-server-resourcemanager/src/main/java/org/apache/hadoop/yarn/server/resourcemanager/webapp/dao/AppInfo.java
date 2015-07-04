@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
 
+import java.util.List;
+
 import javax.xml.bind.annotation.XmlAccessType;
 import javax.xml.bind.annotation.XmlAccessorType;
 import javax.xml.bind.annotation.XmlRootElement;
@@ -26,12 +28,15 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
+import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Times;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
@@ -88,10 +93,16 @@ public class AppInfo {
   protected int numNonAMContainerPreempted;
   protected int numAMContainerPreempted;
 
+  protected List<ResourceRequest> resourceRequests;
+
+  protected LogAggregationStatus logAggregationStatus;
+
   public AppInfo() {
   } // JAXB needs this
 
-  public AppInfo(RMApp app, Boolean hasAccess, String schemePrefix) {
+  @SuppressWarnings({ "rawtypes", "unchecked" })
+  public AppInfo(ResourceManager rm, RMApp app, Boolean hasAccess,
+      String schemePrefix) {
     this.schemePrefix = schemePrefix;
     if (app != null) {
       String trackingUrl = app.getTrackingUrl();
@@ -133,7 +144,7 @@ public class AppInfo {
         this.finishedTime = app.getFinishTime();
         this.elapsedTime = Times.elapsed(app.getStartTime(),
             app.getFinishTime());
-
+        this.logAggregationStatus = app.getLogAggregationStatusForAppReport();
         RMAppAttempt attempt = app.getCurrentAppAttempt();
         if (attempt != null) {
           Container masterContainer = attempt.getMasterContainer();
@@ -154,6 +165,9 @@ public class AppInfo {
             allocatedVCores = usedResources.getVirtualCores();
             runningContainers = resourceReport.getNumUsedContainers();
           }
+          resourceRequests =
+              ((AbstractYarnScheduler) rm.getRMContext().getScheduler())
+                .getPendingResourceRequestsForAttempt(attempt.getAppAttemptId());
         }
       }
 
@@ -200,8 +214,8 @@ public class AppInfo {
     return this.name;
   }
 
-  public String getState() {
-    return this.state.toString();
+  public YarnApplicationState getState() {
+    return this.state;
   }
 
   public float getProgress() {
@@ -216,8 +230,8 @@ public class AppInfo {
     return this.diagnostics;
   }
 
-  public String getFinalStatus() {
-    return this.finalStatus.toString();
+  public FinalApplicationStatus getFinalStatus() {
+    return this.finalStatus;
   }
 
   public String getTrackingUrl() {
@@ -298,5 +312,13 @@ public class AppInfo {
 
   public long getVcoreSeconds() {
     return vcoreSeconds;
+  }
+
+  public List<ResourceRequest> getResourceRequests() {
+    return this.resourceRequests;
+  }
+
+  public LogAggregationStatus getLogAggregationStatus() {
+    return this.logAggregationStatus;
   }
 }

@@ -180,7 +180,7 @@ public class MRApp extends MRAppMaster {
     ApplicationAttemptId appAttemptId =
         getApplicationAttemptId(applicationId, startCount);
     ContainerId containerId =
-        ContainerId.newInstance(appAttemptId, startCount);
+        ContainerId.newContainerId(appAttemptId, startCount);
     return containerId;
   }
 
@@ -482,6 +482,20 @@ public class MRApp extends MRAppMaster {
   }
 
   @Override
+  protected TaskAttemptFinishingMonitor
+      createTaskAttemptFinishingMonitor(
+      EventHandler eventHandler) {
+    return new TaskAttemptFinishingMonitor(eventHandler) {
+      @Override
+      public synchronized void register(TaskAttemptId attemptID) {
+        getContext().getEventHandler().handle(
+            new TaskAttemptEvent(attemptID,
+                TaskAttemptEventType.TA_CONTAINER_COMPLETED));
+      }
+    };
+  }
+
+  @Override
   protected TaskAttemptListener createTaskAttemptListener(
       AppContext context, AMPreemptionPolicy policy) {
     return new TaskAttemptListener(){
@@ -541,6 +555,8 @@ public class MRApp extends MRAppMaster {
             new TaskAttemptEvent(event.getTaskAttemptID(),
                 TaskAttemptEventType.TA_CONTAINER_CLEANED));
         break;
+      case CONTAINER_COMPLETED:
+        break;
       }
     }
   }
@@ -567,7 +583,7 @@ public class MRApp extends MRAppMaster {
      @Override
       public void handle(ContainerAllocatorEvent event) {
         ContainerId cId =
-            ContainerId.newInstance(getContext().getApplicationAttemptId(),
+            ContainerId.newContainerId(getContext().getApplicationAttemptId(),
               containerCount++);
         NodeId nodeId = NodeId.newInstance(NM_HOST, NM_PORT);
         Resource resource = Resource.newInstance(1234, 2);
@@ -775,7 +791,7 @@ public class MRApp extends MRAppMaster {
     ApplicationId applicationId = ApplicationId.newInstance(timestamp, appId);
     ApplicationAttemptId applicationAttemptId =
         ApplicationAttemptId.newInstance(applicationId, appAttemptId);
-    return ContainerId.newInstance(applicationAttemptId, containerId);
+    return ContainerId.newContainerId(applicationAttemptId, containerId);
   }
 
   public static ContainerTokenIdentifier newContainerTokenIdentifier(
@@ -788,5 +804,20 @@ public class MRApp extends MRAppMaster {
             new Text(containerToken.getService()));
     return token.decodeIdentifier();
   }
+
+  @Override
+  protected void shutdownTaskLog() {
+    // Avoid closing the logging system during unit tests,
+    // otherwise subsequent MRApp instances in the same test
+    // will fail to log anything.
+  }
+
+  @Override
+  protected void shutdownLogManager() {
+    // Avoid closing the logging system during unit tests,
+    // otherwise subsequent MRApp instances in the same test
+    // will fail to log anything.
+  }
+
 }
  

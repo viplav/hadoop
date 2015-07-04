@@ -24,21 +24,22 @@ import java.io.PrintWriter;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 
+import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
@@ -50,9 +51,9 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
-import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.io.IOUtils;
@@ -64,9 +65,6 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
-
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
 
 
 public class TestDNFencing {
@@ -82,9 +80,7 @@ public class TestDNFencing {
   private FileSystem fs;
 
   static {
-    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LogFactory.getLog(BlockManager.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
   }
   
   @Before
@@ -155,17 +151,18 @@ public class TestDNFencing {
     banner("NN2 Metadata immediately after failover");
     doMetasave(nn2);
     
-    // Even though NN2 considers the blocks over-replicated, it should
-    // post-pone the block invalidation because the DNs are still "stale".
-    assertEquals(30, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
-    
     banner("Triggering heartbeats and block reports so that fencing is completed");
     cluster.triggerHeartbeats();
     cluster.triggerBlockReports();
     
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
-    
+
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The blocks should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -251,7 +248,12 @@ public class TestDNFencing {
     
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
-    
+
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The block should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -347,6 +349,11 @@ public class TestDNFencing {
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
     
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The block should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -415,6 +422,7 @@ public class TestDNFencing {
     int numQueued = 0;
     int numDN = cluster.getDataNodes().size();
     
+    // case 1: create file and call hflush after write
     FSDataOutputStream out = fs.create(TEST_FILE_PATH);
     try {
       AppendTestUtil.write(out, 0, 10);
@@ -422,28 +430,64 @@ public class TestDNFencing {
 
       // Opening the file will report RBW replicas, but will be
       // queued on the StandbyNode.
+      // However, the delivery of RBW messages is delayed by HDFS-7217 fix.
+      // Apply cluster.triggerBlockReports() to trigger the reporting sooner.
+      //
+      cluster.triggerBlockReports();
       numQueued += numDN; // RBW messages
+
+      // The cluster.triggerBlockReports() call above does a full 
+      // block report that incurs 3 extra RBW messages
+      numQueued += numDN; // RBW messages      
     } finally {
       IOUtils.closeStream(out);
       numQueued += numDN; // blockReceived messages
     }
-    
+
     cluster.triggerBlockReports();
     numQueued += numDN;
-    
+    assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
+        getPendingDataNodeMessageCount());
+
+    // case 2: append to file and call hflush after write
     try {
       out = fs.append(TEST_FILE_PATH);
       AppendTestUtil.write(out, 10, 10);
-      // RBW replicas once it's opened for append
-      numQueued += numDN;
-
+      out.hflush();
+      cluster.triggerBlockReports();
+      numQueued += numDN * 2; // RBW messages, see comments in case 1
     } finally {
       IOUtils.closeStream(out);
       numQueued += numDN; // blockReceived
     }
-    
+    assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
+        getPendingDataNodeMessageCount());
+
+    // case 3: similar to case 2, except no hflush is called.
+    try {
+      out = fs.append(TEST_FILE_PATH);
+      AppendTestUtil.write(out, 20, 10);
+    } finally {
+      // The write operation in the try block is buffered, thus no RBW message
+      // is reported yet until the closeStream call here. When closeStream is
+      // called, before HDFS-7217 fix, there would be three RBW messages
+      // (blockReceiving), plus three FINALIZED messages (blockReceived)
+      // delivered to NN. However, because of HDFS-7217 fix, the reporting of
+      // RBW  messages is postponed. In this case, they are even overwritten 
+      // by the blockReceived messages of the same block when they are waiting
+      // to be delivered. All this happens within the closeStream() call.
+      // What's delivered to NN is the three blockReceived messages. See 
+      //    BPServiceActor#addPendingReplicationBlockInfo 
+      //
+      IOUtils.closeStream(out);
+      numQueued += numDN; // blockReceived
+    }
+
     cluster.triggerBlockReports();
     numQueued += numDN;
+
+    LOG.info("Expect " + numQueued + " and got: " + cluster.getNameNode(1).getNamesystem().
+        getPendingDataNodeMessageCount());      
 
     assertEquals(numQueued, cluster.getNameNode(1).getNamesystem().
         getPendingDataNodeMessageCount());
@@ -458,7 +502,7 @@ public class TestDNFencing {
     assertEquals(0, nn1.getNamesystem().getCorruptReplicaBlocks());
     assertEquals(0, nn2.getNamesystem().getCorruptReplicaBlocks());
     
-    AppendTestUtil.check(fs, TEST_FILE_PATH, 20);
+    AppendTestUtil.check(fs, TEST_FILE_PATH, 30);
   }
   
   /**
@@ -500,7 +544,8 @@ public class TestDNFencing {
         .when(spy).blockReport(
           Mockito.<DatanodeRegistration>anyObject(),
           Mockito.anyString(),
-          Mockito.<StorageBlockReport[]>anyObject());
+          Mockito.<StorageBlockReport[]>anyObject(),
+          Mockito.<BlockReportContext>anyObject());
       dn.scheduleAllBlockReport(0);
       delayer.waitForCall();
       
@@ -595,7 +640,7 @@ public class TestDNFencing {
       Collection<DatanodeStorageInfo> chooseFrom = !first.isEmpty() ? first : second;
 
       List<DatanodeStorageInfo> l = Lists.newArrayList(chooseFrom);
-      return l.get(DFSUtil.getRandom().nextInt(l.size()));
+      return l.get(ThreadLocalRandom.current().nextInt(l.size()));
     }
   }
 

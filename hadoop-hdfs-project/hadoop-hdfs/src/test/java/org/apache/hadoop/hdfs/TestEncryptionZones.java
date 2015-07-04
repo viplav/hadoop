@@ -21,10 +21,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.io.PrintWriter;
 import java.io.RandomAccessFile;
 import java.io.StringReader;
-import java.io.StringWriter;
 import java.net.URI;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
@@ -38,12 +36,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.google.common.collect.Lists;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.crypto.key.JavaKeyStoreProvider;
 import org.apache.hadoop.crypto.key.KeyProvider;
-import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension;
 import org.apache.hadoop.crypto.key.KeyProviderFactory;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FSTestWrapper;
 import org.apache.hadoop.fs.FileContext;
@@ -57,7 +58,9 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.client.HdfsAdmin;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.EncryptionZone;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.namenode.EncryptionFaultInjector;
@@ -66,8 +69,9 @@ import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
 import org.apache.hadoop.hdfs.server.namenode.NamenodeFsck;
 import org.apache.hadoop.hdfs.tools.DFSck;
 import org.apache.hadoop.hdfs.tools.offlineImageViewer.PBImageXmlWriter;
-import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+import org.apache.hadoop.hdfs.web.WebHdfsConstants;
 import org.apache.hadoop.hdfs.web.WebHdfsTestUtil;
+import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -83,10 +87,14 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
+
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyLong;
+import static org.mockito.Matchers.anyObject;
+import static org.mockito.Matchers.anyShort;
 import static org.mockito.Mockito.withSettings;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
-
 import static org.apache.hadoop.hdfs.DFSTestUtil.verifyFilesEqual;
 import static org.apache.hadoop.test.GenericTestUtils.assertExceptionContains;
 import static org.junit.Assert.assertEquals;
@@ -95,6 +103,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+
 import org.xml.sax.InputSource;
 import org.xml.sax.helpers.DefaultHandler;
 
@@ -107,10 +116,10 @@ public class TestEncryptionZones {
   private FileSystemTestHelper fsHelper;
 
   private MiniDFSCluster cluster;
-  private HdfsAdmin dfsAdmin;
-  private DistributedFileSystem fs;
+  protected HdfsAdmin dfsAdmin;
+  protected DistributedFileSystem fs;
   private File testRootDir;
-  private final String TEST_KEY = "testKey";
+  protected final String TEST_KEY = "test_key";
 
   protected FileSystemTestWrapper fsWrapper;
   protected FileContextTestWrapper fcWrapper;
@@ -139,12 +148,16 @@ public class TestEncryptionZones {
     fcWrapper = new FileContextTestWrapper(
         FileContext.getFileContext(cluster.getURI(), conf));
     dfsAdmin = new HdfsAdmin(cluster.getURI(), conf);
-    // Need to set the client's KeyProvider to the NN's for JKS,
-    // else the updates do not get flushed properly
-    fs.getClient().provider = cluster.getNameNode().getNamesystem()
-        .getProvider();
+    setProvider();
     // Create a test key
     DFSTestUtil.createKey(TEST_KEY, cluster, conf);
+  }
+  
+  protected void setProvider() {
+    // Need to set the client's KeyProvider to the NN's for JKS,
+    // else the updates do not get flushed properly
+    fs.getClient().setKeyProvider(cluster.getNameNode().getNamesystem()
+        .getProvider());
   }
 
   @After
@@ -524,6 +537,19 @@ public class TestEncryptionZones {
         !wrapper.exists(pathFooBaz) && wrapper.exists(pathFooBar));
     assertEquals("Renamed file contents not the same",
         contents, DFSTestUtil.readFile(fs, pathFooBarFile));
+
+    // Verify that we can rename an EZ root
+    final Path newFoo = new Path(testRoot, "newfoo");
+    assertTrue("Rename of EZ root", fs.rename(pathFoo, newFoo));
+    assertTrue("Rename of EZ root failed",
+        !wrapper.exists(pathFoo) && wrapper.exists(newFoo));
+
+    // Verify that we can't rename an EZ root onto itself
+    try {
+      wrapper.rename(newFoo, newFoo);
+    } catch (IOException e) {
+      assertExceptionContains("are the same", e);
+    }
   }
 
   @Test(timeout = 60000)
@@ -583,7 +609,7 @@ public class TestEncryptionZones {
     final HdfsAdmin dfsAdmin =
         new HdfsAdmin(FileSystem.getDefaultUri(conf), conf);
     final FileSystem webHdfsFs = WebHdfsTestUtil.getWebHdfsFileSystem(conf,
-        WebHdfsFileSystem.SCHEME);
+        WebHdfsConstants.WEBHDFS_SCHEME);
 
     final Path zone = new Path("/zone");
     fs.mkdirs(zone);
@@ -628,7 +654,7 @@ public class TestEncryptionZones {
   }
 
   @Test(timeout = 60000)
-  public void testCipherSuiteNegotiation() throws Exception {
+  public void testVersionAndSuiteNegotiation() throws Exception {
     final HdfsAdmin dfsAdmin =
         new HdfsAdmin(FileSystem.getDefaultUri(conf), conf);
     final Path zone = new Path("/zone");
@@ -637,43 +663,44 @@ public class TestEncryptionZones {
     // Create a file in an EZ, which should succeed
     DFSTestUtil
         .createFile(fs, new Path(zone, "success1"), 0, (short) 1, 0xFEED);
-    // Pass no cipherSuites, fail
-    fs.getClient().cipherSuites = Lists.newArrayListWithCapacity(0);
+    // Pass no supported versions, fail
+    DFSOutputStream.SUPPORTED_CRYPTO_VERSIONS = new CryptoProtocolVersion[] {};
     try {
       DFSTestUtil.createFile(fs, new Path(zone, "fail"), 0, (short) 1, 0xFEED);
-      fail("Created a file without specifying a CipherSuite!");
-    } catch (UnknownCipherSuiteException e) {
-      assertExceptionContains("No cipher suites", e);
+      fail("Created a file without specifying a crypto protocol version");
+    } catch (UnknownCryptoProtocolVersionException e) {
+      assertExceptionContains("No crypto protocol versions", e);
     }
-    // Pass some unknown cipherSuites, fail
-    fs.getClient().cipherSuites = Lists.newArrayListWithCapacity(3);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
+    // Pass some unknown versions, fail
+    DFSOutputStream.SUPPORTED_CRYPTO_VERSIONS = new CryptoProtocolVersion[]
+        { CryptoProtocolVersion.UNKNOWN, CryptoProtocolVersion.UNKNOWN };
     try {
       DFSTestUtil.createFile(fs, new Path(zone, "fail"), 0, (short) 1, 0xFEED);
-      fail("Created a file without specifying a CipherSuite!");
-    } catch (UnknownCipherSuiteException e) {
-      assertExceptionContains("No cipher suites", e);
+      fail("Created a file without specifying a known crypto protocol version");
+    } catch (UnknownCryptoProtocolVersionException e) {
+      assertExceptionContains("No crypto protocol versions", e);
     }
     // Pass some unknown and a good cipherSuites, success
-    fs.getClient().cipherSuites = Lists.newArrayListWithCapacity(3);
-    fs.getClient().cipherSuites.add(CipherSuite.AES_CTR_NOPADDING);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
+    DFSOutputStream.SUPPORTED_CRYPTO_VERSIONS =
+        new CryptoProtocolVersion[] {
+            CryptoProtocolVersion.UNKNOWN,
+            CryptoProtocolVersion.UNKNOWN,
+            CryptoProtocolVersion.ENCRYPTION_ZONES };
     DFSTestUtil
         .createFile(fs, new Path(zone, "success2"), 0, (short) 1, 0xFEED);
-    fs.getClient().cipherSuites = Lists.newArrayListWithCapacity(3);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
-    fs.getClient().cipherSuites.add(CipherSuite.UNKNOWN);
-    fs.getClient().cipherSuites.add(CipherSuite.AES_CTR_NOPADDING);
+    DFSOutputStream.SUPPORTED_CRYPTO_VERSIONS =
+        new CryptoProtocolVersion[] {
+            CryptoProtocolVersion.ENCRYPTION_ZONES,
+            CryptoProtocolVersion.UNKNOWN,
+            CryptoProtocolVersion.UNKNOWN} ;
     DFSTestUtil
         .createFile(fs, new Path(zone, "success3"), 4096, (short) 1, 0xFEED);
     // Check KeyProvider state
     // Flushing the KP on the NN, since it caches, and init a test one
     cluster.getNamesystem().getProvider().flush();
     KeyProvider provider = KeyProviderFactory
-        .get(new URI(conf.get(DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI)), conf);
+        .get(new URI(conf.getTrimmed(DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI)),
+            conf);
     List<String> keys = provider.getKeys();
     assertEquals("Expected NN to have created one key per zone", 1,
         keys.size());
@@ -690,6 +717,66 @@ public class TestEncryptionZones {
           getFileEncryptionInfo(new Path(zone.toString() +
               "/success" + i));
       assertEquals(feInfo.getCipherSuite(), CipherSuite.AES_CTR_NOPADDING);
+    }
+
+    DFSClient old = fs.dfs;
+    try {
+      testCipherSuiteNegotiation(fs, conf);
+    } finally {
+      fs.dfs = old;
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void mockCreate(ClientProtocol mcp,
+      CipherSuite suite, CryptoProtocolVersion version) throws Exception {
+    Mockito.doReturn(
+        new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
+            (short) 777), "owner", "group", new byte[0], new byte[0],
+            1010, 0, new FileEncryptionInfo(suite,
+            version, new byte[suite.getAlgorithmBlockSize()],
+            new byte[suite.getAlgorithmBlockSize()],
+            "fakeKey", "fakeVersion"),
+            (byte) 0))
+        .when(mcp)
+        .create(anyString(), (FsPermission) anyObject(), anyString(),
+            (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
+            anyShort(), anyLong(), (CryptoProtocolVersion[]) anyObject());
+  }
+
+  // This test only uses mocks. Called from the end of an existing test to
+  // avoid an extra mini cluster.
+  private static void testCipherSuiteNegotiation(DistributedFileSystem fs,
+      Configuration conf) throws Exception {
+    // Set up mock ClientProtocol to test client-side CipherSuite negotiation
+    final ClientProtocol mcp = Mockito.mock(ClientProtocol.class);
+
+    // Try with an empty conf
+    final Configuration noCodecConf = new Configuration(conf);
+    final CipherSuite suite = CipherSuite.AES_CTR_NOPADDING;
+    final String confKey = CommonConfigurationKeysPublic
+        .HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX + suite
+        .getConfigSuffix();
+    noCodecConf.set(confKey, "");
+    fs.dfs = new DFSClient(null, mcp, noCodecConf, null);
+    mockCreate(mcp, suite, CryptoProtocolVersion.ENCRYPTION_ZONES);
+    try {
+      fs.create(new Path("/mock"));
+      fail("Created with no configured codecs!");
+    } catch (UnknownCipherSuiteException e) {
+      assertExceptionContains("No configuration found for the cipher", e);
+    }
+
+    // Try create with an UNKNOWN CipherSuite
+    fs.dfs = new DFSClient(null, mcp, conf, null);
+    CipherSuite unknown = CipherSuite.UNKNOWN;
+    unknown.setUnknownValue(989);
+    mockCreate(mcp, unknown, CryptoProtocolVersion.ENCRYPTION_ZONES);
+    try {
+      fs.create(new Path("/mock"));
+      fail("Created with unknown cipher!");
+    } catch (IOException e) {
+      assertExceptionContains("unknown CipherSuite with ID 989", e);
     }
   }
 
@@ -910,7 +997,7 @@ public class TestEncryptionZones {
 
     // Test when the parent directory becomes a different EZ
     fsWrapper.mkdir(zone1, FsPermission.getDirDefault(), true);
-    final String otherKey = "otherKey";
+    final String otherKey = "other_key";
     DFSTestUtil.createKey(otherKey, cluster, conf);
     dfsAdmin.createEncryptionZone(zone1, TEST_KEY);
 
@@ -930,7 +1017,7 @@ public class TestEncryptionZones {
 
     // Test that the retry limit leads to an error
     fsWrapper.mkdir(zone1, FsPermission.getDirDefault(), true);
-    final String anotherKey = "anotherKey";
+    final String anotherKey = "another_key";
     DFSTestUtil.createKey(anotherKey, cluster, conf);
     dfsAdmin.createEncryptionZone(zone1, anotherKey);
     String keyToUse = otherKey;
@@ -971,7 +1058,7 @@ public class TestEncryptionZones {
   public void testDelegationToken() throws Exception {
     UserGroupInformation.createRemoteUser("JobTracker");
     DistributedFileSystem dfs = cluster.getFileSystem();
-    KeyProviderCryptoExtension keyProvider = Mockito.mock(KeyProviderCryptoExtension.class,
+    KeyProvider keyProvider = Mockito.mock(KeyProvider.class,
         withSettings().extraInterfaces(
             DelegationTokenExtension.class,
             CryptoExtension.class));
@@ -984,7 +1071,7 @@ public class TestEncryptionZones {
         addDelegationTokens(anyString(), (Credentials)any())).
         thenReturn(new Token<?>[] { testToken });
 
-    dfs.getClient().provider = keyProvider;
+    dfs.getClient().setKeyProvider(keyProvider);
 
     Credentials creds = new Credentials();
     final Token<?> tokens[] = dfs.addDelegationTokens("JobTracker", creds);
@@ -1146,6 +1233,28 @@ public class TestEncryptionZones {
     fs.delete(target, true);
   }
 
+  @Test(timeout = 60000)
+  public void testConcatFailsInEncryptionZones() throws Exception {
+    final int len = 8192;
+    final Path ez = new Path("/ez");
+    fs.mkdirs(ez);
+    dfsAdmin.createEncryptionZone(ez, TEST_KEY);
+    final Path src1 = new Path(ez, "src1");
+    final Path src2 = new Path(ez, "src2");
+    final Path target = new Path(ez, "target");
+    DFSTestUtil.createFile(fs, src1, len, (short)1, 0xFEED);
+    DFSTestUtil.createFile(fs, src2, len, (short)1, 0xFEED);
+    DFSTestUtil.createFile(fs, target, len, (short)1, 0xFEED);
+    try {
+      fs.concat(target, new Path[] { src1, src2 });
+      fail("expected concat to throw en exception for files in an ez");
+    } catch (IOException e) {
+      assertExceptionContains(
+          "concat can not be called for files in an encryption zone", e);
+    }
+    fs.delete(ez, true);
+  }
+
   /**
    * Test running the OfflineImageViewer on a system with encryption zones.
    */
@@ -1168,11 +1277,11 @@ public class TestEncryptionZones {
     }
 
     // Run the XML OIV processor
-    StringWriter output = new StringWriter();
-    PrintWriter pw = new PrintWriter(output);
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    PrintStream pw = new PrintStream(output);
     PBImageXmlWriter v = new PBImageXmlWriter(new Configuration(), pw);
     v.visit(new RandomAccessFile(originalFsimage, "r"));
-    final String xml = output.getBuffer().toString();
+    final String xml = output.toString();
     SAXParser parser = SAXParserFactory.newInstance().newSAXParser();
     parser.parse(new InputSource(new StringReader(xml)), new DefaultHandler());
   }
@@ -1197,5 +1306,23 @@ public class TestEncryptionZones {
     assertEquals("File is encrypted",
         true, fs.getFileStatus(zoneFile).isEncrypted());
     DFSTestUtil.verifyFilesNotEqual(fs, zoneFile, rawFile, len);
+  }
+
+  @Test(timeout = 60000)
+  public void testEncryptionZonesOnRelativePath() throws Exception {
+    final int len = 8196;
+    final Path baseDir = new Path("/somewhere/base");
+    final Path zoneDir = new Path("zone");
+    final Path zoneFile = new Path("file");
+    fs.setWorkingDirectory(baseDir);
+    fs.mkdirs(zoneDir);
+    dfsAdmin.createEncryptionZone(zoneDir, TEST_KEY);
+    DFSTestUtil.createFile(fs, zoneFile, len, (short) 1, 0xFEED);
+
+    assertNumZones(1);
+    assertZonePresent(TEST_KEY, "/somewhere/base/zone");
+
+    assertEquals("Got unexpected ez path", "/somewhere/base/zone", dfsAdmin
+        .getEncryptionZoneForPath(zoneDir).getPath().toString());
   }
 }

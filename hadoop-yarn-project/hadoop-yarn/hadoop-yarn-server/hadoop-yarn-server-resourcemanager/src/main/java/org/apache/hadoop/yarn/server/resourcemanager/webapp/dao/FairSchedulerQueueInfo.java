@@ -19,7 +19,6 @@
 package org.apache.hadoop.yarn.server.resourcemanager.webapp.dao;
 
 
-import java.util.ArrayList;
 import java.util.Collection;
 
 import javax.xml.bind.annotation.XmlAccessType;
@@ -60,9 +59,9 @@ public class FairSchedulerQueueInfo {
   
   private String queueName;
   private String schedulingPolicy;
-  
-  private Collection<FairSchedulerQueueInfo> childQueues;
-  
+
+  private FairSchedulerQueueInfoList childQueues;
+
   public FairSchedulerQueueInfo() {
   }
   
@@ -94,16 +93,35 @@ public class FairSchedulerQueueInfo {
     fractionMemMaxShare = (float)maxResources.getMemory() / clusterResources.getMemory();
     
     maxApps = allocConf.getQueueMaxApps(queueName);
-    
+
+    if (allocConf.isReservable(queueName) &&
+        !allocConf.getShowReservationAsQueues(queueName)) {
+      return;
+    }
+
+    childQueues = getChildQueues(queue, scheduler);
+  }
+
+  protected FairSchedulerQueueInfoList getChildQueues(FSQueue queue,
+                                                      FairScheduler scheduler) {
+    // Return null to omit 'childQueues' field from the return value of
+    // REST API if it is empty. We omit the field to keep the consistency
+    // with CapacitySchedulerQueueInfo, which omits 'queues' field if empty.
     Collection<FSQueue> children = queue.getChildQueues();
-    childQueues = new ArrayList<FairSchedulerQueueInfo>();
+    if (children.isEmpty()) {
+      return null;
+    }
+    FairSchedulerQueueInfoList list = new FairSchedulerQueueInfoList();
     for (FSQueue child : children) {
       if (child instanceof FSLeafQueue) {
-        childQueues.add(new FairSchedulerLeafQueueInfo((FSLeafQueue)child, scheduler));
+        list.addToQueueInfoList(
+            new FairSchedulerLeafQueueInfo((FSLeafQueue) child, scheduler));
       } else {
-        childQueues.add(new FairSchedulerQueueInfo(child, scheduler));
+        list.addToQueueInfoList(
+            new FairSchedulerQueueInfo(child, scheduler));
       }
     }
+    return list;
   }
   
   /**
@@ -184,8 +202,8 @@ public class FairSchedulerQueueInfo {
   public String getSchedulingPolicy() {
     return schedulingPolicy;
   }
-  
+
   public Collection<FairSchedulerQueueInfo> getChildQueues() {
-    return childQueues;
+    return childQueues.getQueueInfoList();
   }
 }

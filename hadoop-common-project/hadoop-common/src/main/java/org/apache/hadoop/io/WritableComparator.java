@@ -30,7 +30,7 @@ import org.apache.hadoop.util.ReflectionUtils;
 
 /** A Comparator for {@link WritableComparable}s.
  *
- * <p>This base implemenation uses the natural ordering.  To define alternate
+ * <p>This base implementation uses the natural ordering.  To define alternate
  * orderings, override {@link #compare(WritableComparable,WritableComparable)}.
  *
  * <p>One may optimize compare-intensive operations by overriding
@@ -160,6 +160,7 @@ public class WritableComparator implements RawComparator, Configurable {
       buffer.reset(b2, s2, l2);                   // parse key2
       key2.readFields(buffer);
       
+      buffer.reset(null, 0, 0);                   // clean up reference
     } catch (IOException e) {
       throw new RuntimeException(e);
     }

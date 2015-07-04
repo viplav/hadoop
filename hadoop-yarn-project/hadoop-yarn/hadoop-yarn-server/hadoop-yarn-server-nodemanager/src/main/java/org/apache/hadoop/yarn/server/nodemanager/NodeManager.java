@@ -19,7 +19,10 @@
 package org.apache.hadoop.yarn.server.nodemanager;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,8 +35,12 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.service.CompositeService;
+import org.apache.hadoop.util.ExitUtil;
+import org.apache.hadoop.util.GenericOptionsParser;
+import org.apache.hadoop.util.NodeHealthScriptRunner;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
 import org.apache.hadoop.util.StringUtils;
@@ -48,11 +55,13 @@ import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
 import org.apache.hadoop.yarn.server.api.records.NodeHealthStatus;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.ContainerManagerImpl;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.Application;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
+import org.apache.hadoop.yarn.server.nodemanager.nodelabels.NodeLabelsProvider;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMLeveldbStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMNullStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService;
@@ -75,6 +84,7 @@ public class NodeManager extends CompositeService
   protected final NodeManagerMetrics metrics = NodeManagerMetrics.create();
   private ApplicationACLsManager aclsManager;
   private NodeHealthCheckerService nodeHealthChecker;
+  private NodeLabelsProvider nodeLabelsProvider;
   private LocalDirsHandlerService dirsHandler;
   private Context context;
   private AsyncDispatcher dispatcher;
@@ -85,6 +95,7 @@ public class NodeManager extends CompositeService
   
   private AtomicBoolean isStopping = new AtomicBoolean(false);
   private boolean rmWorkPreservingRestartEnabled;
+  private boolean shouldExitOnShutdownEvent = false;
 
   public NodeManager() {
     super(NodeManager.class.getName());
@@ -93,7 +104,22 @@ public class NodeManager extends CompositeService
   protected NodeStatusUpdater createNodeStatusUpdater(Context context,
       Dispatcher dispatcher, NodeHealthCheckerService healthChecker) {
     return new NodeStatusUpdaterImpl(context, dispatcher, healthChecker,
-      metrics);
+        metrics, nodeLabelsProvider);
+  }
+
+  protected NodeStatusUpdater createNodeStatusUpdater(Context context,
+      Dispatcher dispatcher, NodeHealthCheckerService healthChecker,
+      NodeLabelsProvider nodeLabelsProvider) {
+    return new NodeStatusUpdaterImpl(context, dispatcher, healthChecker,
+        metrics, nodeLabelsProvider);
+  }
+
+  @VisibleForTesting
+  protected NodeLabelsProvider createNodeLabelsProvider(
+      Configuration conf) throws IOException {
+    // TODO as part of YARN-2729
+    // Need to get the implementation of provider service and return
+    return null;
   }
 
   protected NodeResourceMonitor createNodeResourceMonitor() {
@@ -154,17 +180,21 @@ public class NodeManager extends CompositeService
   }
 
   private void stopRecoveryStore() throws IOException {
-    nmStore.stop();
-    if (context.getDecommissioned() && nmStore.canRecover()) {
-      LOG.info("Removing state store due to decommission");
-      Configuration conf = getConfig();
-      Path recoveryRoot = new Path(
-          conf.get(YarnConfiguration.NM_RECOVERY_DIR));
-      LOG.info("Removing state store at " + recoveryRoot
-          + " due to decommission");
-      FileSystem recoveryFs = FileSystem.getLocal(conf);
-      if (!recoveryFs.delete(recoveryRoot, true)) {
-        LOG.warn("Unable to delete " + recoveryRoot);
+    if (null != nmStore) {
+      nmStore.stop();
+      if (null != context) {
+        if (context.getDecommissioned() && nmStore.canRecover()) {
+          LOG.info("Removing state store due to decommission");
+          Configuration conf = getConfig();
+          Path recoveryRoot =
+              new Path(conf.get(YarnConfiguration.NM_RECOVERY_DIR));
+          LOG.info("Removing state store at " + recoveryRoot
+              + " due to decommission");
+          FileSystem recoveryFs = FileSystem.getLocal(conf);
+          if (!recoveryFs.delete(recoveryRoot, true)) {
+            LOG.warn("Unable to delete " + recoveryRoot);
+          }
+        }
       }
     }
   }
@@ -176,6 +206,27 @@ public class NodeManager extends CompositeService
       nmTokenSecretManager.recover();
       containerTokenSecretManager.recover();
     }
+  }
+
+  public static NodeHealthScriptRunner getNodeHealthScriptRunner(Configuration conf) {
+    String nodeHealthScript = 
+        conf.get(YarnConfiguration.NM_HEALTH_CHECK_SCRIPT_PATH);
+    if(!NodeHealthScriptRunner.shouldRun(nodeHealthScript)) {
+      LOG.info("Node Manager health check script is not available "
+          + "or doesn't have execute permission, so not "
+          + "starting the node health script runner.");
+      return null;
+    }
+    long nmCheckintervalTime = conf.getLong(
+        YarnConfiguration.NM_HEALTH_CHECK_INTERVAL_MS,
+        YarnConfiguration.DEFAULT_NM_HEALTH_CHECK_INTERVAL_MS);
+    long scriptTimeout = conf.getLong(
+        YarnConfiguration.NM_HEALTH_CHECK_SCRIPT_TIMEOUT_MS,
+        YarnConfiguration.DEFAULT_NM_HEALTH_CHECK_SCRIPT_TIMEOUT_MS);
+    String[] scriptArgs = conf.getStrings(
+        YarnConfiguration.NM_HEALTH_CHECK_SCRIPT_OPTS, new String[] {});
+    return new NodeHealthScriptRunner(nodeHealthScript,
+        nmCheckintervalTime, scriptTimeout, scriptArgs);
   }
 
   @Override
@@ -213,15 +264,26 @@ public class NodeManager extends CompositeService
     // NodeManager level dispatcher
     this.dispatcher = new AsyncDispatcher();
 
-    nodeHealthChecker = new NodeHealthCheckerService();
+    dirsHandler = new LocalDirsHandlerService(metrics);
+    nodeHealthChecker =
+        new NodeHealthCheckerService(
+            getNodeHealthScriptRunner(conf), dirsHandler);
     addService(nodeHealthChecker);
-    dirsHandler = nodeHealthChecker.getDiskHandler();
 
     this.context = createNMContext(containerTokenSecretManager,
         nmTokenSecretManager, nmStore);
-    
-    nodeStatusUpdater =
-        createNodeStatusUpdater(context, dispatcher, nodeHealthChecker);
+
+    nodeLabelsProvider = createNodeLabelsProvider(conf);
+
+    if (null == nodeLabelsProvider) {
+      nodeStatusUpdater =
+          createNodeStatusUpdater(context, dispatcher, nodeHealthChecker);
+    } else {
+      addService(nodeLabelsProvider);
+      nodeStatusUpdater =
+          createNodeStatusUpdater(context, dispatcher, nodeHealthChecker,
+              nodeLabelsProvider);
+    }
 
     NodeResourceMonitor nodeResourceMonitor = createNodeResourceMonitor();
     addService(nodeResourceMonitor);
@@ -266,9 +328,14 @@ public class NodeManager extends CompositeService
     if (isStopping.getAndSet(true)) {
       return;
     }
-    super.serviceStop();
-    stopRecoveryStore();
-    DefaultMetricsSystem.shutdown();
+    try {
+      super.serviceStop();
+      DefaultMetricsSystem.shutdown();
+    } finally {
+      // YARN-3641: NM's services stop get failed shouldn't block the
+      // release of NMLevelDBStore.
+      stopRecoveryStore();
+    }
   }
 
   public String getName() {
@@ -279,7 +346,16 @@ public class NodeManager extends CompositeService
     new Thread() {
       @Override
       public void run() {
-        NodeManager.this.stop();
+        try {
+          NodeManager.this.stop();
+        } catch (Throwable t) {
+          LOG.error("Error while shutting down NodeManager", t);
+        } finally {
+          if (shouldExitOnShutdownEvent
+              && !ShutdownHookManager.get().isShutdownInProgress()) {
+            ExitUtil.terminate(-1);
+          }
+        }
       }
     }.start();
   }
@@ -313,6 +389,10 @@ public class NodeManager extends CompositeService
     private NodeId nodeId = null;
     protected final ConcurrentMap<ApplicationId, Application> applications =
         new ConcurrentHashMap<ApplicationId, Application>();
+
+    private volatile Map<ApplicationId, Credentials> systemCredentials =
+        new HashMap<ApplicationId, Credentials>();
+
     protected final ConcurrentMap<ContainerId, Container> containers =
         new ConcurrentSkipListMap<ContainerId, Container>();
 
@@ -326,6 +406,8 @@ public class NodeManager extends CompositeService
         .getRecordFactory(null).newRecordInstance(NodeHealthStatus.class);
     private final NMStateStoreService stateStore;
     private boolean isDecommissioned = false;
+    private final ConcurrentLinkedQueue<LogAggregationReport>
+        logAggregationReportForApps;
 
     public NMContext(NMContainerTokenSecretManager containerTokenSecretManager,
         NMTokenSecretManagerInNM nmTokenSecretManager,
@@ -339,6 +421,8 @@ public class NodeManager extends CompositeService
       this.nodeHealthStatus.setHealthReport("Healthy");
       this.nodeHealthStatus.setLastHealthReportTime(System.currentTimeMillis());
       this.stateStore = stateStore;
+      this.logAggregationReportForApps = new ConcurrentLinkedQueue<
+          LogAggregationReport>();
     }
 
     /**
@@ -420,6 +504,22 @@ public class NodeManager extends CompositeService
     public void setDecommissioned(boolean isDecommissioned) {
       this.isDecommissioned = isDecommissioned;
     }
+
+    @Override
+    public Map<ApplicationId, Credentials> getSystemCredentialsForApps() {
+      return systemCredentials;
+    }
+
+    public void setSystemCrendentialsForApps(
+        Map<ApplicationId, Credentials> systemCredentials) {
+      this.systemCredentials = systemCredentials;
+    }
+
+    @Override
+    public ConcurrentLinkedQueue<LogAggregationReport>
+        getLogAggregationStatusForApps() {
+      return this.logAggregationReportForApps;
+    }
   }
 
 
@@ -441,7 +541,9 @@ public class NodeManager extends CompositeService
       nodeManagerShutdownHook = new CompositeServiceShutdownHook(this);
       ShutdownHookManager.get().addShutdownHook(nodeManagerShutdownHook,
                                                 SHUTDOWN_HOOK_PRIORITY);
-
+      // System exit should be called only when NodeManager is instantiated from
+      // main() funtion
+      this.shouldExitOnShutdownEvent = true;
       this.init(conf);
       this.start();
     } catch (Throwable t) {
@@ -484,11 +586,12 @@ public class NodeManager extends CompositeService
     return this.context;
   }
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws IOException {
     Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
     StringUtils.startupShutdownMessage(NodeManager.class, args, LOG);
     NodeManager nodeManager = new NodeManager();
     Configuration conf = new YarnConfiguration();
+    new GenericOptionsParser(conf, args);
     nodeManager.initAndStartNodeManager(conf, false);
   }
 

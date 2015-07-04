@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.api.records.impl.pb;
 import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationContextProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationContextProtoOrBuilder;
+
 import com.google.protobuf.TextFormat;
 
 public class LogAggregationContextPBImpl extends LogAggregationContext{
@@ -118,17 +119,40 @@ public class LogAggregationContextPBImpl extends LogAggregationContext{
   }
 
   @Override
-  public long getRollingIntervalSeconds() {
+  public String getRolledLogsIncludePattern() {
     LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
-    if (! p.hasRollingIntervalSeconds()) {
-      return -1;
+    if (! p.hasRolledLogsIncludePattern()) {
+      return null;
     }
-    return p.getRollingIntervalSeconds();
+    return p.getRolledLogsIncludePattern();
   }
 
   @Override
-  public void setRollingIntervalSeconds(long rollingIntervalSeconds) {
+  public void setRolledLogsIncludePattern(String rolledLogsIncludePattern) {
     maybeInitBuilder();
-    builder.setRollingIntervalSeconds(rollingIntervalSeconds);
+    if (rolledLogsIncludePattern == null) {
+      builder.clearRolledLogsIncludePattern();
+      return;
+    }
+    builder.setRolledLogsIncludePattern(rolledLogsIncludePattern);
+  }
+
+  @Override
+  public String getRolledLogsExcludePattern() {
+    LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
+    if (! p.hasRolledLogsExcludePattern()) {
+      return null;
+    }
+    return p.getRolledLogsExcludePattern();
+  }
+
+  @Override
+  public void setRolledLogsExcludePattern(String rolledLogsExcludePattern) {
+    maybeInitBuilder();
+    if (rolledLogsExcludePattern == null) {
+      builder.clearRolledLogsExcludePattern();
+      return;
+    }
+    builder.setRolledLogsExcludePattern(rolledLogsExcludePattern);
   }
 }

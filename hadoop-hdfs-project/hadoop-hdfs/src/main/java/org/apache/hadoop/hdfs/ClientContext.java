@@ -23,9 +23,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdfs.DFSClient.Conf;
+import org.apache.hadoop.hdfs.client.impl.DfsClientConf;
+import org.apache.hadoop.hdfs.client.impl.DfsClientConf.ShortCircuitConf;
 import org.apache.hadoop.hdfs.shortcircuit.DomainSocketFactory;
 import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitCache;
+import org.apache.hadoop.hdfs.util.ByteArrayManager;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -71,6 +73,10 @@ public class ClientContext {
   private final DomainSocketFactory domainSocketFactory;
 
   /**
+   * Caches key Providers for the DFSClient
+   */
+  private final KeyProviderCache keyProviderCache;
+  /**
    * True if we should use the legacy BlockReaderLocal.
    */
   private final boolean useLegacyBlockReaderLocal;
@@ -84,60 +90,33 @@ public class ClientContext {
    */
   private volatile boolean disableLegacyBlockReaderLocal = false;
 
+  /** Creating byte[] for {@link DFSOutputStream}. */
+  private final ByteArrayManager byteArrayManager;  
+
   /**
    * Whether or not we complained about a DFSClient fetching a CacheContext that
    * didn't match its config values yet.
    */
   private boolean printedConfWarning = false;
 
-  private ClientContext(String name, Conf conf) {
+  private ClientContext(String name, DfsClientConf conf) {
+    final ShortCircuitConf scConf = conf.getShortCircuitConf();
+
     this.name = name;
-    this.confString = confAsString(conf);
-    this.shortCircuitCache = new ShortCircuitCache(
-        conf.shortCircuitStreamsCacheSize,
-        conf.shortCircuitStreamsCacheExpiryMs,
-        conf.shortCircuitMmapCacheSize,
-        conf.shortCircuitMmapCacheExpiryMs,
-        conf.shortCircuitMmapCacheRetryTimeout,
-        conf.shortCircuitCacheStaleThresholdMs,
-        conf.shortCircuitSharedMemoryWatcherInterruptCheckMs);
-    this.peerCache =
-          new PeerCache(conf.socketCacheCapacity, conf.socketCacheExpiry);
-    this.useLegacyBlockReaderLocal = conf.useLegacyBlockReaderLocal;
-    this.domainSocketFactory = new DomainSocketFactory(conf);
+    this.confString = scConf.confAsString();
+    this.shortCircuitCache = ShortCircuitCache.fromConf(scConf);
+    this.peerCache = new PeerCache(scConf.getSocketCacheCapacity(),
+        scConf.getSocketCacheExpiry());
+    this.keyProviderCache = new KeyProviderCache(
+        scConf.getKeyProviderCacheExpiryMs());
+    this.useLegacyBlockReaderLocal = scConf.isUseLegacyBlockReaderLocal();
+    this.domainSocketFactory = new DomainSocketFactory(scConf);
+
+    this.byteArrayManager = ByteArrayManager.newInstance(
+        conf.getWriteByteArrayManagerConf());
   }
 
-  public static String confAsString(Conf conf) {
-    StringBuilder builder = new StringBuilder();
-    builder.append("shortCircuitStreamsCacheSize = ").
-      append(conf.shortCircuitStreamsCacheSize).
-      append(", shortCircuitStreamsCacheExpiryMs = ").
-      append(conf.shortCircuitStreamsCacheExpiryMs).
-      append(", shortCircuitMmapCacheSize = ").
-      append(conf.shortCircuitMmapCacheSize).
-      append(", shortCircuitMmapCacheExpiryMs = ").
-      append(conf.shortCircuitMmapCacheExpiryMs).
-      append(", shortCircuitMmapCacheRetryTimeout = ").
-      append(conf.shortCircuitMmapCacheRetryTimeout).
-      append(", shortCircuitCacheStaleThresholdMs = ").
-      append(conf.shortCircuitCacheStaleThresholdMs).
-      append(", socketCacheCapacity = ").
-      append(conf.socketCacheCapacity).
-      append(", socketCacheExpiry = ").
-      append(conf.socketCacheExpiry).
-      append(", shortCircuitLocalReads = ").
-      append(conf.shortCircuitLocalReads).
-      append(", useLegacyBlockReaderLocal = ").
-      append(conf.useLegacyBlockReaderLocal).
-      append(", domainSocketDataTraffic = ").
-      append(conf.domainSocketDataTraffic).
-      append(", shortCircuitSharedMemoryWatcherInterruptCheckMs = ").
-      append(conf.shortCircuitSharedMemoryWatcherInterruptCheckMs);
-
-    return builder.toString();
-  }
-
-  public static ClientContext get(String name, Conf conf) {
+  public static ClientContext get(String name, DfsClientConf conf) {
     ClientContext context;
     synchronized(ClientContext.class) {
       context = CACHES.get(name);
@@ -161,12 +140,12 @@ public class ClientContext {
   public static ClientContext getFromConf(Configuration conf) {
     return get(conf.get(DFSConfigKeys.DFS_CLIENT_CONTEXT,
         DFSConfigKeys.DFS_CLIENT_CONTEXT_DEFAULT),
-            new DFSClient.Conf(conf));
+            new DfsClientConf(conf));
   }
 
-  private void printConfWarningIfNeeded(Conf conf) {
+  private void printConfWarningIfNeeded(DfsClientConf conf) {
     String existing = this.getConfString();
-    String requested = confAsString(conf);
+    String requested = conf.getShortCircuitConf().confAsString();
     if (!existing.equals(requested)) {
       if (!printedConfWarning) {
         printedConfWarning = true;
@@ -189,6 +168,10 @@ public class ClientContext {
     return peerCache;
   }
 
+  public KeyProviderCache getKeyProviderCache() {
+    return keyProviderCache;
+  }
+
   public boolean getUseLegacyBlockReaderLocal() {
     return useLegacyBlockReaderLocal;
   }
@@ -203,5 +186,9 @@ public class ClientContext {
 
   public DomainSocketFactory getDomainSocketFactory() {
     return domainSocketFactory;
+  }
+
+  public ByteArrayManager getByteArrayManager() {
+    return byteArrayManager;
   }
 }

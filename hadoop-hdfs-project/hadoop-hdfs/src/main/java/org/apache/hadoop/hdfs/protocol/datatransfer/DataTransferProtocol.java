@@ -23,7 +23,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
@@ -92,6 +92,8 @@ public interface DataTransferProtocol {
    * @param minBytesRcvd minimum number of bytes received.
    * @param maxBytesRcvd maximum number of bytes received.
    * @param latestGenerationStamp the latest generation stamp of the block.
+   * @param pinning whether to pin the block, so Balancer won't move it.
+   * @param targetPinnings whether to pin the block on target datanode
    */
   public void writeBlock(final ExtendedBlock blk,
       final StorageType storageType, 
@@ -106,8 +108,10 @@ public interface DataTransferProtocol {
       final long maxBytesRcvd,
       final long latestGenerationStamp,
       final DataChecksum requestedChecksum,
-      final CachingStrategy cachingStrategy) throws IOException;
-
+      final CachingStrategy cachingStrategy,
+      final boolean allowLazyPersist,
+      final boolean pinning,
+      final boolean[] targetPinnings) throws IOException;
   /**
    * Transfer a block to another datanode.
    * The block stage must be
@@ -134,10 +138,13 @@ public interface DataTransferProtocol {
    *                          to use no slot id.
    * @param maxVersion      Maximum version of the block data the client 
    *                          can understand.
+   * @param supportsReceiptVerification  True if the client supports
+   *                          receipt verification.
    */
   public void requestShortCircuitFds(final ExtendedBlock blk,
       final Token<BlockTokenIdentifier> blockToken,
-      SlotId slotId, int maxVersion) throws IOException;
+      SlotId slotId, int maxVersion, boolean supportsReceiptVerification)
+        throws IOException;
 
   /**
    * Release a pair of short-circuit FDs requested earlier.

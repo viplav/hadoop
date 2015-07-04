@@ -61,6 +61,11 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
       <type>test-jar</type>
     </dependency>
     <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-hdfs-client</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
       <groupId>org.apache.zookeeper</groupId>
       <artifactId>zookeeper</artifactId>
       <type>test-jar</type>
@@ -173,7 +178,12 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
     </dependency>
     <dependency>
       <groupId>io.netty</groupId>
-      <artifactId>netty</artifactId>
+      <artifactId>netty-all</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.twitter</groupId>
+      <artifactId>hpack</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -182,7 +192,7 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
       <scope>compile</scope>
     </dependency>
     <dependency>
-      <groupId>org.htrace</groupId>
+      <groupId>org.apache.htrace</groupId>
       <artifactId>htrace-core</artifactId>
     </dependency>
     <dependency>
@@ -196,6 +206,17 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-kms</artifactId>
       <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.fusesource.leveldbjni</groupId>
+      <artifactId>leveldbjni-all</artifactId>
+      <version>1.8</version>
+    </dependency>
+    <!-- 'mvn dependency:analyze' fails to detect use of this dependency -->
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk16</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -245,6 +266,9 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
                       filtering="true"/>
                 <copy file="${basedir}/src/main/webapps/proto-web.xml"
                       tofile="${project.build.directory}/webapps/journal/WEB-INF/web.xml"
+                      filtering="true"/>
+                <copy file="${basedir}/src/main/webapps/proto-web.xml"
+                      tofile="${project.build.directory}/webapps/nfs3/WEB-INF/web.xml"
                       filtering="true"/>
                 <copy toDir="${project.build.directory}/webapps">
                   <fileset dir="${basedir}/src/main/webapps">
@@ -346,9 +370,9 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <exclude>CHANGES.txt</exclude>
             <exclude>CHANGES.HDFS-1623.txt</exclude>
             <exclude>CHANGES.HDFS-347.txt</exclude>
+            <exclude>.gitattributes</exclude>
             <exclude>.idea/**</exclude>
             <exclude>src/main/conf/*</exclude>
-            <exclude>src/main/docs/**</exclude>
             <exclude>dev-support/findbugsExcludeFile.xml</exclude>
             <exclude>dev-support/checkstyle*</exclude>
             <exclude>dev-support/jdiff/**</exclude>
@@ -365,7 +389,6 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <exclude>src/main/native/util/tree.h</exclude>
             <exclude>src/test/aop/org/apache/hadoop/hdfs/server/datanode/DataXceiverAspects.aj</exclude>
             <exclude>src/main/webapps/datanode/robots.txt</exclude>
-            <exclude>src/main/docs/releasenotes.html</exclude>
             <exclude>src/contrib/**</exclude>
             <exclude>src/site/resources/images/*</exclude>
             <exclude>src/main/webapps/static/bootstrap-3.0.2/**</exclude>
@@ -373,6 +396,21 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <exclude>src/main/webapps/static/dust-helpers-1.1.1.min.js</exclude>
             <exclude>src/main/webapps/static/jquery-1.10.2.min.js</exclude>
           </excludes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-clean-plugin</artifactId>
+        <configuration>
+          <filesets>
+            <fileset>
+              <directory>src/site/resources</directory>
+              <includes>
+                <include>configuration.xsl</include>
+                <include>hdfs-default.xml</include>
+              </includes>
+              <followSymlinks>false</followSymlinks>
+            </fileset>
+          </filesets>
         </configuration>
       </plugin>
     </plugins>
@@ -425,10 +463,13 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
                 </goals>
                 <configuration>
                   <target>
+                    <condition property="generator" value="Visual Studio 10" else="Visual Studio 10 Win64">
+                      <equals arg1="Win32" arg2="${env.PLATFORM}" />
+                    </condition>
                     <mkdir dir="${project.build.directory}/native"/>
                     <exec executable="cmake" dir="${project.build.directory}/native"
                         failonerror="true">
-                      <arg line="${basedir}/src/ -DGENERATED_JAVAH=${project.build.directory}/native/javah -DJVM_ARCH_DATA_MODEL=${sun.arch.data.model} -DREQUIRE_LIBWEBHDFS=${require.libwebhdfs} -DREQUIRE_FUSE=${require.fuse} -G 'Visual Studio 10 Win64'"/>
+                      <arg line="${basedir}/src/ -DGENERATED_JAVAH=${project.build.directory}/native/javah -DJVM_ARCH_DATA_MODEL=${sun.arch.data.model} -DREQUIRE_LIBWEBHDFS=${require.libwebhdfs} -DREQUIRE_FUSE=${require.fuse} -G '${generator}'"/>
                     </exec>
                     <exec executable="msbuild" dir="${project.build.directory}/native"
                         failonerror="true">
@@ -633,7 +674,7 @@ http://maven.apache.org/xsd/maven-4.0.0.xsd">
                 <phase>test-compile</phase>
                 <configuration>
                   <target>
-                    <exec executable="sh">
+                    <exec executable="${shell-executable}">
                       <arg value="-c"/>
                       <arg value="for i in {1..${testsThreadCount}}; do mkdir -p ${test.build.data}/$i; mkdir -p ${hadoop.tmp.dir}/$i; done"/>
                     </exec>

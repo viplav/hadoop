@@ -21,6 +21,7 @@ package org.apache.hadoop.mapreduce.v2.app;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -47,6 +48,7 @@ import org.apache.hadoop.mapred.LocalContainerLauncher;
 import org.apache.hadoop.mapred.TaskAttemptListenerImpl;
 import org.apache.hadoop.mapred.TaskLog;
 import org.apache.hadoop.mapred.TaskUmbilicalProtocol;
+import org.apache.hadoop.mapreduce.CryptoUtils;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.OutputCommitter;
@@ -54,6 +56,7 @@ import org.apache.hadoop.mapreduce.OutputFormat;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.mapreduce.TypeConverter;
+import org.apache.hadoop.mapreduce.counters.Limits;
 import org.apache.hadoop.mapreduce.jobhistory.AMStartedEvent;
 import org.apache.hadoop.mapreduce.jobhistory.EventReader;
 import org.apache.hadoop.mapreduce.jobhistory.EventType;
@@ -147,6 +150,8 @@ import org.apache.log4j.LogManager;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import javax.crypto.KeyGenerator;
+
 /**
  * The Map-Reduce Application Master.
  * The state machine is encapsulated in the implementation of Job interface.
@@ -174,6 +179,7 @@ public class MRAppMaster extends CompositeService {
    * Priority of the MRAppMaster shutdown hook.
    */
   public static final int SHUTDOWN_HOOK_PRIORITY = 30;
+  public static final String INTERMEDIATE_DATA_ENCRYPTION_ALGO = "HmacSHA1";
 
   private Clock clock;
   private final long startTime;
@@ -205,6 +211,15 @@ public class MRAppMaster extends CompositeService {
   private JobHistoryEventHandler jobHistoryEventHandler;
   private SpeculatorEventDispatcher speculatorEventDispatcher;
   private AMPreemptionPolicy preemptionPolicy;
+  private byte[] encryptedSpillKey;
+
+  // After a task attempt completes from TaskUmbilicalProtocol's point of view,
+  // it will be transitioned to finishing state.
+  // taskAttemptFinishingMonitor is just a timer for attempts in finishing
+  // state. If the attempt stays in finishing state for too long,
+  // taskAttemptFinishingMonitor will notify the attempt via TA_TIMED_OUT
+  // event.
+  private TaskAttemptFinishingMonitor taskAttemptFinishingMonitor;
 
   private Job job;
   private Credentials jobCredentials = new Credentials(); // Filled during init
@@ -219,6 +234,7 @@ public class MRAppMaster extends CompositeService {
   private final ScheduledExecutorService logSyncer;
 
   private long recoveredJobStartTime = 0;
+  private static boolean mainStarted = false;
 
   @VisibleForTesting
   protected AtomicBoolean successfullyUnregistered =
@@ -247,6 +263,12 @@ public class MRAppMaster extends CompositeService {
     logSyncer = TaskLog.createLogSyncer();
     LOG.info("Created MRAppMaster for application " + applicationAttemptId);
   }
+  protected TaskAttemptFinishingMonitor createTaskAttemptFinishingMonitor(
+      EventHandler eventHandler) {
+    TaskAttemptFinishingMonitor monitor =
+        new TaskAttemptFinishingMonitor(eventHandler);
+    return monitor;
+  }
 
   @Override
   protected void serviceInit(final Configuration conf) throws Exception {
@@ -257,7 +279,11 @@ public class MRAppMaster extends CompositeService {
 
     initJobCredentialsAndUGI(conf);
 
-    context = new RunningAppContext(conf);
+    dispatcher = createDispatcher();
+    addIfService(dispatcher);
+    taskAttemptFinishingMonitor = createTaskAttemptFinishingMonitor(dispatcher.getEventHandler());
+    addIfService(taskAttemptFinishingMonitor);
+    context = new RunningAppContext(conf, taskAttemptFinishingMonitor);
 
     // Job name is the same as the app name util we support DAG of jobs
     // for an app later
@@ -308,14 +334,20 @@ public class MRAppMaster extends CompositeService {
             " because a commit was started.");
         copyHistory = true;
         if (commitSuccess) {
-          shutDownMessage = "We crashed after successfully committing. Recovering.";
+          shutDownMessage =
+              "Job commit succeeded in a prior MRAppMaster attempt " +
+              "before it crashed. Recovering.";
           forcedState = JobStateInternal.SUCCEEDED;
         } else if (commitFailure) {
-          shutDownMessage = "We crashed after a commit failure.";
+          shutDownMessage =
+              "Job commit failed in a prior MRAppMaster attempt " +
+              "before it crashed. Not retrying.";
           forcedState = JobStateInternal.FAILED;
         } else {
           //The commit is still pending, commit error
-          shutDownMessage = "We crashed durring a commit";
+          shutDownMessage =
+              "Job commit from a prior MRAppMaster attempt is " +
+              "potentially in progress. Preventing multiple commit executions";
           forcedState = JobStateInternal.ERROR;
         }
       }
@@ -324,9 +356,6 @@ public class MRAppMaster extends CompositeService {
     }
     
     if (errorHappenedShutDown) {
-      dispatcher = createDispatcher();
-      addIfService(dispatcher);
-      
       NoopEventHandler eater = new NoopEventHandler();
       //We do not have a JobEventDispatcher in this path
       dispatcher.register(JobEventType.class, eater);
@@ -372,9 +401,6 @@ public class MRAppMaster extends CompositeService {
       }
     } else {
       committer = createOutputCommitter(conf);
-
-      dispatcher = createDispatcher();
-      addIfService(dispatcher);
 
       //service to handle requests from JobClient
       clientService = createClientService(context);
@@ -562,7 +588,7 @@ public class MRAppMaster extends CompositeService {
       //if isLastAMRetry comes as true, should never set it to false
       if ( !isLastAMRetry){
         if (((JobImpl)job).getInternalState() != JobStateInternal.REBOOT) {
-          LOG.info("We are finishing cleanly so this is the last retry");
+          LOG.info("Job finished cleanly, recording last MRAppMaster retry");
           isLastAMRetry = true;
         }
       }
@@ -603,11 +629,38 @@ public class MRAppMaster extends CompositeService {
       }
       clientService.stop();
     } catch (Throwable t) {
-      LOG.warn("Graceful stop failed ", t);
+      LOG.warn("Graceful stop failed. Exiting.. ", t);
+      exitMRAppMaster(1, t);
     }
-
+    exitMRAppMaster(0, null);
   }
- 
+
+  /** MRAppMaster exit method which has been instrumented for both runtime and
+   *  unit testing.
+   * If the main thread has not been started, this method was called from a
+   * test. In that case, configure the ExitUtil object to not exit the JVM.
+   *
+   * @param status integer indicating exit status
+   * @param t throwable exception that could be null
+   */
+  private void exitMRAppMaster(int status, Throwable t) {
+    if (!mainStarted) {
+      ExitUtil.disableSystemExit();
+    }
+    try {
+      if (t != null) {
+        ExitUtil.terminate(status, t);
+      } else {
+        ExitUtil.terminate(status);
+      }
+    } catch (ExitUtil.ExitException ee) {
+      // ExitUtil.ExitException is only thrown from the ExitUtil test code when
+      // SystemExit has been disabled. It is always thrown in in the test code,
+      // even when no error occurs. Ignore the exception so that tests don't
+      // need to handle it.
+    }
+  }
+
   private class JobFinishEventHandler implements EventHandler<JobFinishEvent> {
     @Override
     public void handle(JobFinishEvent event) {
@@ -663,7 +716,21 @@ public class MRAppMaster extends CompositeService {
     try {
       this.currentUser = UserGroupInformation.getCurrentUser();
       this.jobCredentials = ((JobConf)conf).getCredentials();
+      if (CryptoUtils.isEncryptedSpillEnabled(conf)) {
+        int keyLen = conf.getInt(
+                MRJobConfig.MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS,
+                MRJobConfig
+                        .DEFAULT_MR_ENCRYPTED_INTERMEDIATE_DATA_KEY_SIZE_BITS);
+        KeyGenerator keyGen =
+                KeyGenerator.getInstance(INTERMEDIATE_DATA_ENCRYPTION_ALGO);
+        keyGen.init(keyLen);
+        encryptedSpillKey = keyGen.generateKey().getEncoded();
+      } else {
+        encryptedSpillKey = new byte[] {0};
+      }
     } catch (IOException e) {
+      throw new YarnRuntimeException(e);
+    } catch (NoSuchAlgorithmException e) {
       throw new YarnRuntimeException(e);
     }
   }
@@ -721,7 +788,7 @@ public class MRAppMaster extends CompositeService {
       AMPreemptionPolicy preemptionPolicy) {
     TaskAttemptListener lis =
         new TaskAttemptListenerImpl(context, jobTokenSecretManager,
-            getRMHeartbeatHandler(), preemptionPolicy);
+            getRMHeartbeatHandler(), preemptionPolicy, encryptedSpillKey);
     return lis;
   }
 
@@ -887,7 +954,9 @@ public class MRAppMaster extends CompositeService {
     protected void serviceStart() throws Exception {
       if (job.isUber()) {
         this.containerLauncher = new LocalContainerLauncher(context,
-            (TaskUmbilicalProtocol) taskAttemptListener);
+            (TaskUmbilicalProtocol) taskAttemptListener, jobClassLoader);
+        ((LocalContainerLauncher) this.containerLauncher)
+                .setEncryptedSpillKey(encryptedSpillKey);
       } else {
         this.containerLauncher = new ContainerLauncherImpl(context);
       }
@@ -936,10 +1005,14 @@ public class MRAppMaster extends CompositeService {
     private final ClusterInfo clusterInfo = new ClusterInfo();
     private final ClientToAMTokenSecretManager clientToAMTokenSecretManager;
 
-    public RunningAppContext(Configuration config) {
+    private final TaskAttemptFinishingMonitor taskAttemptFinishingMonitor;
+
+    public RunningAppContext(Configuration config,
+        TaskAttemptFinishingMonitor taskAttemptFinishingMonitor) {
       this.conf = config;
       this.clientToAMTokenSecretManager =
           new ClientToAMTokenSecretManager(appAttemptID, null);
+      this.taskAttemptFinishingMonitor = taskAttemptFinishingMonitor;
     }
 
     @Override
@@ -1024,6 +1097,12 @@ public class MRAppMaster extends CompositeService {
     public String getNMHostname() {
       return nmHost;
     }
+
+    @Override
+    public TaskAttemptFinishingMonitor getTaskAttemptFinishingMonitor() {
+      return taskAttemptFinishingMonitor;
+    }
+
   }
 
   @SuppressWarnings("unchecked")
@@ -1050,7 +1129,7 @@ public class MRAppMaster extends CompositeService {
           new JobHistoryEvent(job.getID(), new AMStartedEvent(info
               .getAppAttemptId(), info.getStartTime(), info.getContainerId(),
               info.getNodeManagerHost(), info.getNodeManagerPort(), info
-                  .getNodeManagerHttpPort())));
+                  .getNodeManagerHttpPort(), appSubmitTime)));
     }
 
     // Send out an MR AM inited event for this AM.
@@ -1059,7 +1138,7 @@ public class MRAppMaster extends CompositeService {
             .getAppAttemptId(), amInfo.getStartTime(), amInfo.getContainerId(),
             amInfo.getNodeManagerHost(), amInfo.getNodeManagerPort(), amInfo
                 .getNodeManagerHttpPort(), this.forcedState == null ? null
-                    : this.forcedState.toString())));
+                    : this.forcedState.toString(), appSubmitTime)));
     amInfos.add(amInfo);
 
     // metrics system init is really init & start.
@@ -1107,6 +1186,8 @@ public class MRAppMaster extends CompositeService {
 
     // finally set the job classloader
     MRApps.setClassLoader(jobClassLoader, getConfig());
+    // set job classloader if configured
+    Limits.init(getConfig());
 
     if (initFailed) {
       JobEvent initFailedEvent = new JobEvent(job.getID(), JobEventType.JOB_INIT_FAILED);
@@ -1116,11 +1197,15 @@ public class MRAppMaster extends CompositeService {
       startJobs();
     }
   }
-  
+
+  protected void shutdownTaskLog() {
+    TaskLog.syncLogsShutdown(logSyncer);
+  }
+
   @Override
   public void stop() {
     super.stop();
-    TaskLog.syncLogsShutdown(logSyncer);
+    shutdownTaskLog();
   }
 
   private boolean isRecoverySupported() throws IOException {
@@ -1403,6 +1488,7 @@ public class MRAppMaster extends CompositeService {
 
   public static void main(String[] args) {
     try {
+      mainStarted = true;
       Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
       String containerIdStr =
           System.getenv(Environment.CONTAINER_ID.name());
@@ -1447,10 +1533,6 @@ public class MRAppMaster extends CompositeService {
       String jobUserName = System
           .getenv(ApplicationConstants.Environment.USER.name());
       conf.set(MRJobConfig.USER_NAME, jobUserName);
-      // Do not automatically close FileSystem objects so that in case of
-      // SIGTERM I have a chance to write out the job history. I'll be closing
-      // the objects myself.
-      conf.setBoolean("fs.automatic.close", false);
       initAndStartAppMaster(appMaster, conf, jobUserName);
     } catch (Throwable t) {
       LOG.fatal("Error starting MRAppMaster", t);
@@ -1627,10 +1709,14 @@ public class MRAppMaster extends CompositeService {
     T call(Configuration conf) throws Exception;
   }
 
+  protected void shutdownLogManager() {
+    LogManager.shutdown();
+  }
+
   @Override
   protected void serviceStop() throws Exception {
     super.serviceStop();
-    LogManager.shutdown();
+    shutdownLogManager();
   }
 
   public ClientService getClientService() {

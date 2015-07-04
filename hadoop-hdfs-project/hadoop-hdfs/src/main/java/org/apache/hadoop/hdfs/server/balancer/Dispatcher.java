@@ -41,20 +41,18 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil;
 import org.apache.hadoop.hdfs.protocol.datatransfer.IOStreamPair;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.protocol.datatransfer.TrustedChannelResolver;
@@ -76,6 +74,7 @@ import org.apache.hadoop.util.HostsFileReader;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 /** Dispatching block replica moves between datanodes. */
@@ -119,7 +118,7 @@ public class Dispatcher {
   /** The maximum number of concurrent blocks moves at a datanode */
   private final int maxConcurrentMovesPerNode;
 
-  private final AtomicLong bytesMoved = new AtomicLong();
+  private final int ioFileBufferSize;
 
   private static class GlobalBlockMap {
     private final Map<Block, DBlock> map = new HashMap<Block, DBlock>();
@@ -246,6 +245,10 @@ public class Dispatcher {
      */
     private boolean chooseProxySource() {
       final DatanodeInfo targetDN = target.getDatanodeInfo();
+      // if source and target are same nodes then no need of proxy
+      if (source.getDatanodeInfo().equals(targetDN) && addTo(source)) {
+        return true;
+      }
       // if node group is supported, first try add nodes in the same node group
       if (cluster.isNodeGroupAware()) {
         for (StorageGroup loc : block.getLocations()) {
@@ -307,13 +310,13 @@ public class Dispatcher {
         unbufOut = saslStreams.out;
         unbufIn = saslStreams.in;
         out = new DataOutputStream(new BufferedOutputStream(unbufOut,
-            HdfsConstants.IO_FILE_BUFFER_SIZE));
+            ioFileBufferSize));
         in = new DataInputStream(new BufferedInputStream(unbufIn,
-            HdfsConstants.IO_FILE_BUFFER_SIZE));
+            ioFileBufferSize));
 
         sendRequest(out, eb, accessToken);
         receiveResponse(in);
-        bytesMoved.addAndGet(block.getNumBytes());
+        nnc.getBytesMoved().addAndGet(block.getNumBytes());
         LOG.info("Successfully moved " + this);
       } catch (IOException e) {
         LOG.warn("Failed to move " + this + ": " + e.getMessage());
@@ -356,12 +359,8 @@ public class Dispatcher {
         // read intermediate responses
         response = BlockOpResponseProto.parseFrom(vintPrefixed(in));
       }
-      if (response.getStatus() != Status.SUCCESS) {
-        if (response.getStatus() == Status.ERROR_ACCESS_TOKEN) {
-          throw new IOException("block move failed due to access token error");
-        }
-        throw new IOException("block move is failed: " + response.getMessage());
-      }
+      String logInfo = "block move is failed";
+      DataTransferProtoUtil.checkBlockOpStatus(response, logInfo);
     }
 
     /** reset the object */
@@ -377,19 +376,6 @@ public class Dispatcher {
   public static class DBlock extends MovedBlocks.Locations<StorageGroup> {
     public DBlock(Block block) {
       super(block);
-    }
-
-    @Override
-    public synchronized boolean isLocatedOn(StorageGroup loc) {
-      // currently we only check if replicas are located on the same DataNodes
-      // since we do not have the capability to store two replicas in the same
-      // DataNode even though they are on two different storage types
-      for (StorageGroup existing : locations) {
-        if (existing.getDatanodeInfo().equals(loc.getDatanodeInfo())) {
-          return true;
-        }
-      }
-      return false;
     }
   }
 
@@ -484,6 +470,25 @@ public class Dispatcher {
       public String toString() {
         return getDisplayName();
       }
+
+      @Override
+      public int hashCode() {
+        return getStorageType().hashCode() ^ getDatanodeInfo().hashCode();
+      }
+
+      @Override
+      public boolean equals(Object obj) {
+        if (this == obj) {
+          return true;
+        } else if (obj == null || !(obj instanceof StorageGroup)) {
+          return false;
+        } else {
+          final StorageGroup that = (StorageGroup) obj;
+          return this.getStorageType() == that.getStorageType()
+              && this.getDatanodeInfo().equals(that.getDatanodeInfo());
+        }
+      }
+
     }
 
     final DatanodeInfo datanode;
@@ -768,6 +773,16 @@ public class Dispatcher {
         }
       }
     }
+
+    @Override
+    public int hashCode() {
+      return super.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      return super.equals(obj);
+    }
   }
 
   public Dispatcher(NameNodeConnector nnc, Set<String> includedNodes,
@@ -785,9 +800,10 @@ public class Dispatcher {
         : Executors.newFixedThreadPool(dispatcherThreads);
     this.maxConcurrentMovesPerNode = maxConcurrentMovesPerNode;
 
-    this.saslClient = new SaslDataTransferClient(
+    this.saslClient = new SaslDataTransferClient(conf,
         DataTransferSaslUtil.getSaslPropertiesResolver(conf),
         TrustedChannelResolver.getInstance(conf), nnc.fallbackToSimpleAuth);
+    this.ioFileBufferSize = DFSUtil.getIoFileBufferSize(conf);
   }
 
   public DistributedFileSystem getDistributedFileSystem() {
@@ -803,7 +819,7 @@ public class Dispatcher {
   }
   
   long getBytesMoved() {
-    return bytesMoved.get();
+    return nnc.getBytesMoved().get();
   }
 
   long bytesToMove() {
@@ -889,7 +905,7 @@ public class Dispatcher {
    * @return the total number of bytes successfully moved in this iteration.
    */
   private long dispatchBlockMoves() throws InterruptedException {
-    final long bytesLastMoved = bytesMoved.get();
+    final long bytesLastMoved = getBytesMoved();
     final Future<?>[] futures = new Future<?>[sources.size()];
 
     final Iterator<Source> i = sources.iterator();
@@ -915,7 +931,7 @@ public class Dispatcher {
     // wait for all block moving to be done
     waitForMoveCompletion(targets);
 
-    return bytesMoved.get() - bytesLastMoved;
+    return getBytesMoved() - bytesLastMoved;
   }
 
   /** The sleeping period before checking if block move is completed again */
@@ -957,6 +973,9 @@ public class Dispatcher {
    */
   private boolean isGoodBlockCandidate(StorageGroup source, StorageGroup target,
       StorageType targetStorageType, DBlock block) {
+    if (source.equals(target)) {
+      return false;
+    }
     if (target.storageType != targetStorageType) {
       return false;
     }
@@ -964,9 +983,19 @@ public class Dispatcher {
     if (movedBlocks.contains(block.getBlock())) {
       return false;
     }
-    if (block.isLocatedOn(target)) {
-      return false;
+    final DatanodeInfo targetDatanode = target.getDatanodeInfo();
+    if (source.getDatanodeInfo().equals(targetDatanode)) {
+      // the block is moved inside same DN
+      return true;
     }
+
+    // check if block has replica in target node
+    for (StorageGroup blockLocation : block.getLocations()) {
+      if (blockLocation.getDatanodeInfo().equals(targetDatanode)) {
+        return false;
+      }
+    }
+
     if (cluster.isNodeGroupAware()
         && isOnSameNodeGroupWithReplicas(source, target, block)) {
       return false;

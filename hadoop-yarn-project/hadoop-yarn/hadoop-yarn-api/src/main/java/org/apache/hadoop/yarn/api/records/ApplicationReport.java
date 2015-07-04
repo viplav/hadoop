@@ -28,23 +28,22 @@ import org.apache.hadoop.yarn.util.Records;
 import java.util.Set;
 
 /**
- * <p><code>ApplicationReport</code> is a report of an application.</p>
- *
- * <p>It includes details such as:
- *   <ul>
- *     <li>{@link ApplicationId} of the application.</li>
- *     <li>Applications user.</li>
- *     <li>Application queue.</li>
- *     <li>Application name.</li>
- *     <li>Host on which the <code>ApplicationMaster</code> is running.</li>
- *     <li>RPC port of the <code>ApplicationMaster</code>.</li>
- *     <li>Tracking URL.</li>
- *     <li>{@link YarnApplicationState} of the application.</li>
- *     <li>Diagnostic information in case of errors.</li>
- *     <li>Start time of the application.</li>
- *     <li>Client {@link Token} of the application (if security is enabled).</li>
- *   </ul>
- * </p>
+ * {@code ApplicationReport} is a report of an application.
+ * <p>
+ * It includes details such as:
+ * <ul>
+ *   <li>{@link ApplicationId} of the application.</li>
+ *   <li>Applications user.</li>
+ *   <li>Application queue.</li>
+ *   <li>Application name.</li>
+ *   <li>Host on which the <code>ApplicationMaster</code> is running.</li>
+ *   <li>RPC port of the <code>ApplicationMaster</code>.</li>
+ *   <li>Tracking URL.</li>
+ *   <li>{@link YarnApplicationState} of the application.</li>
+ *   <li>Diagnostic information in case of errors.</li>
+ *   <li>Start time of the application.</li>
+ *   <li>Client {@link Token} of the application (if security is enabled).</li>
+ * </ul>
  *
  * @see ApplicationClientProtocol#getApplicationReport(org.apache.hadoop.yarn.api.protocolrecords.GetApplicationReportRequest)
  */
@@ -81,6 +80,25 @@ public abstract class ApplicationReport {
     report.setProgress(progress);
     report.setApplicationType(applicationType);
     report.setAMRMToken(amRmToken);
+    return report;
+  }
+
+  @Private
+  @Unstable
+  public static ApplicationReport newInstance(ApplicationId applicationId,
+      ApplicationAttemptId applicationAttemptId, String user, String queue,
+      String name, String host, int rpcPort, Token clientToAMToken,
+      YarnApplicationState state, String diagnostics, String url,
+      long startTime, long finishTime, FinalApplicationStatus finalStatus,
+      ApplicationResourceUsageReport appResources, String origTrackingUrl,
+      float progress, String applicationType, Token amRmToken,
+      Set<String> tags) {
+    ApplicationReport report =
+        newInstance(applicationId, applicationAttemptId, user, queue, name,
+          host, rpcPort, clientToAMToken, state, diagnostics, url, startTime,
+          finishTime, finalStatus, appResources, origTrackingUrl, progress,
+          applicationType, amRmToken);
+    report.setApplicationTags(tags);
     return report;
   }
 
@@ -341,20 +359,20 @@ public abstract class ApplicationReport {
 
   /**
    * Get the AMRM token of the application.
-   * <p/>
+   * <p>
    * The AMRM token is required for AM to RM scheduling operations. For 
    * managed Application Masters Yarn takes care of injecting it. For unmanaged
    * Applications Masters, the token must be obtained via this method and set
    * in the {@link org.apache.hadoop.security.UserGroupInformation} of the
    * current user.
-   * <p/>
+   * <p>
    * The AMRM token will be returned only if all the following conditions are
    * met:
-   * <li>
-   *   <ul>the requester is the owner of the ApplicationMaster</ul>
-   *   <ul>the application master is an unmanaged ApplicationMaster</ul>
-   *   <ul>the application master is in ACCEPTED state</ul>
-   * </li>
+   * <ul>
+   *   <li>the requester is the owner of the ApplicationMaster</li>
+   *   <li>the application master is an unmanaged ApplicationMaster</li>
+   *   <li>the application master is in ACCEPTED state</li>
+   * </ul>
    * Else this method returns NULL.
    * 
    * @return the AM to RM token if available.
@@ -362,5 +380,17 @@ public abstract class ApplicationReport {
   @Public
   @Stable
   public abstract Token getAMRMToken();
-  
+
+  /**
+   * Get log aggregation status for the application
+   * @return Application's log aggregation status
+   */
+  @Public
+  @Stable
+  public abstract LogAggregationStatus getLogAggregationStatus();
+
+  @Private
+  @Unstable
+  public abstract void setLogAggregationStatus(
+      LogAggregationStatus logAggregationStatus);
 }

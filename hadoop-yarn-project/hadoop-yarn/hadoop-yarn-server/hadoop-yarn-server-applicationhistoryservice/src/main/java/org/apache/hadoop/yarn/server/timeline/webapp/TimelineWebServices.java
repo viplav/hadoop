@@ -42,22 +42,17 @@ import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
-import javax.xml.bind.annotation.XmlAccessType;
-import javax.xml.bind.annotation.XmlAccessorType;
-import javax.xml.bind.annotation.XmlElement;
-import javax.xml.bind.annotation.XmlRootElement;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.classification.InterfaceAudience.Public;
-import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.util.VersionInfo;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineDomain;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineDomains;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntities;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEvents;
-import org.apache.hadoop.yarn.api.records.timeline.TimelineDomain;
-import org.apache.hadoop.yarn.api.records.timeline.TimelineDomains;
 import org.apache.hadoop.yarn.api.records.timeline.TimelinePutResponse;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.timeline.EntityIdentifier;
@@ -65,6 +60,9 @@ import org.apache.hadoop.yarn.server.timeline.GenericObjectMapper;
 import org.apache.hadoop.yarn.server.timeline.NameValuePair;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineReader.Field;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineAbout;
+import org.apache.hadoop.yarn.util.YarnVersionInfo;
+import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
 import org.apache.hadoop.yarn.webapp.ForbiddenException;
 import org.apache.hadoop.yarn.webapp.NotFoundException;
@@ -86,43 +84,16 @@ public class TimelineWebServices {
     this.timelineDataManager = timelineDataManager;
   }
 
-  @XmlRootElement(name = "about")
-  @XmlAccessorType(XmlAccessType.NONE)
-  @Public
-  @Unstable
-  public static class AboutInfo {
-
-    private String about;
-
-    public AboutInfo() {
-
-    }
-
-    public AboutInfo(String about) {
-      this.about = about;
-    }
-
-    @XmlElement(name = "About")
-    public String getAbout() {
-      return about;
-    }
-
-    public void setAbout(String about) {
-      this.about = about;
-    }
-
-  }
-
   /**
    * Return the description of the timeline web services.
    */
   @GET
   @Produces({ MediaType.APPLICATION_JSON /* , MediaType.APPLICATION_XML */})
-  public AboutInfo about(
+  public TimelineAbout about(
       @Context HttpServletRequest req,
       @Context HttpServletResponse res) {
     init(res);
-    return new AboutInfo("Timeline API");
+    return TimelineUtils.createTimelineAbout("Timeline API");
   }
 
   /**
@@ -272,7 +243,7 @@ public class TimelineWebServices {
   @PUT
   @Path("/domain")
   @Consumes({ MediaType.APPLICATION_JSON /* , MediaType.APPLICATION_XML */})
-  public Response putDomain(
+  public TimelinePutResponse putDomain(
       @Context HttpServletRequest req,
       @Context HttpServletResponse res,
       TimelineDomain domain) {
@@ -295,7 +266,7 @@ public class TimelineWebServices {
       throw new WebApplicationException(e,
           Response.Status.INTERNAL_SERVER_ERROR);
     }
-    return Response.status(Status.OK).build();
+    return new TimelinePutResponse();
   }
 
   /**
@@ -418,7 +389,7 @@ public class TimelineWebServices {
     String[] strs = str.split(delimiter);
     List<Field> fieldList = new ArrayList<Field>();
     for (String s : strs) {
-      s = s.trim().toUpperCase();
+      s = StringUtils.toUpperCase(s.trim());
       if (s.equals("EVENTS")) {
         fieldList.add(Field.EVENTS);
       } else if (s.equals("LASTEVENTONLY")) {

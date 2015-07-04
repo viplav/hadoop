@@ -17,14 +17,17 @@
 
 function hadoop_usage()
 {
-  echo "Usage: hadoop [--config confdir] COMMAND"
-  echo "       where COMMAND is one of:"
+  echo "Usage: hadoop [--config confdir] [COMMAND | CLASSNAME]"
+  echo "  CLASSNAME            run the class named CLASSNAME"
+  echo " or"
+  echo "  where COMMAND is one of:"
   echo "  archive -archiveName NAME -p <parent path> <src>* <dest>"
   echo "                       create a Hadoop archive"
   echo "  checknative [-a|-h]  check native Hadoop and compression "
   echo "                         libraries availability"
   echo "  classpath            prints the class path needed to get the"
   echo "                         Hadoop jar and the required libraries"
+  echo "  conftest             validate configuration XML files"
   echo "  credential           interact with credential providers"
   echo "  daemonlog            get/set the log level for each daemon"
   echo "  distch path:owner:group:permisson"
@@ -33,11 +36,13 @@ function hadoop_usage()
   echo "                       copy file or directories recursively"
   echo "  fs                   run a generic filesystem user client"
   echo "  jar <jar>            run a jar file"
+  echo "                       note: please use \"yarn jar\" to launch"
+  echo "                             YARN applications, not this command."
   echo "  jnipath              prints the java.library.path"
+  echo "  kerbname             show auth_to_local principal conversion"
   echo "  key                  manage keys via the KeyProvider"
+  echo "  trace                view and modify Hadoop tracing settings"
   echo "  version              print the version"
-  echo " or"
-  echo "  CLASSNAME            run the class named CLASSNAME"
   echo ""
   echo "Most commands print help when invoked w/o parameters."
 }
@@ -121,13 +126,10 @@ case ${COMMAND} in
     CLASS=org.apache.hadoop.util.NativeLibraryChecker
   ;;
   classpath)
-    if [[ "$#" -eq 1 ]]; then
-      CLASS=org.apache.hadoop.util.Classpath
-    else   
-      hadoop_finalize
-      echo "${CLASSPATH}"
-      exit 0
-    fi
+    hadoop_do_classpath_subcommand CLASS "$@"
+  ;;
+  conftest)
+    CLASS=org.apache.hadoop.util.ConfTest
   ;;
   credential)
     CLASS=org.apache.hadoop.security.alias.CredentialShell
@@ -149,6 +151,9 @@ case ${COMMAND} in
     CLASS=org.apache.hadoop.fs.FsShell
   ;;
   jar)
+    if [[ -n "${YARN_OPTS}" ]] || [[ -n "${YARN_CLIENT_OPTS}" ]]; then
+      hadoop_error "WARNING: Use \"yarn jar\" to launch YARN applications."
+    fi
     CLASS=org.apache.hadoop.util.RunJar
   ;;
   jnipath)
@@ -156,8 +161,14 @@ case ${COMMAND} in
     echo "${JAVA_LIBRARY_PATH}"
     exit 0
   ;;
+  kerbname)
+    CLASS=org.apache.hadoop.security.HadoopKerberosName
+  ;;
   key)
     CLASS=org.apache.hadoop.crypto.key.KeyShell
+  ;;
+  trace)
+    CLASS=org.apache.hadoop.tracing.TraceAdmin
   ;;
   version)
     CLASS=org.apache.hadoop.util.VersionInfo
@@ -170,11 +181,16 @@ case ${COMMAND} in
   ;;
 esac
 
+hadoop_verify_user "${COMMAND}"
+
+if [[ ${HADOOP_SLAVE_MODE} = true ]]; then
+  hadoop_common_slave_mode_execute "${HADOOP_HDFS_HOME}/bin/hdfs" "${HADOOP_USER_PARAMS[@]}"
+  exit $?
+fi
+
 # Always respect HADOOP_OPTS and HADOOP_CLIENT_OPTS
 hadoop_debug "Appending HADOOP_CLIENT_OPTS onto HADOOP_OPTS"
 HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
-
-hadoop_add_param HADOOP_OPTS Xmx "${JAVA_HEAP_MAX}"
 
 hadoop_finalize
 hadoop_java_exec "${COMMAND}" "${CLASS}" "$@"

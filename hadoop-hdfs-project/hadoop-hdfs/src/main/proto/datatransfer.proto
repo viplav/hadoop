@@ -42,6 +42,7 @@ message DataTransferEncryptorMessageProto {
   required DataTransferEncryptorStatus status = 1;
   optional bytes payload = 2;
   optional string message = 3;
+  repeated CipherOptionProto cipherOption = 4;
 }
 
 message BaseHeaderProto {
@@ -115,6 +116,16 @@ message OpWriteBlockProto {
   optional CachingStrategyProto cachingStrategy = 10;
   optional StorageTypeProto storageType = 11 [default = DISK];
   repeated StorageTypeProto targetStorageTypes = 12;
+
+  /**
+   * Hint to the DataNode that the block can be allocated on transient
+   * storage i.e. memory and written to disk lazily. The DataNode is free
+   * to ignore this hint.
+   */
+  optional bool allowLazyPersist = 13 [default = false];
+  //whether to pin the block, so Balancer won't move it.
+  optional bool pinning = 14 [default = false];
+  repeated bool targetPinnings = 15;
 }
   
 message OpTransferBlockProto {
@@ -168,6 +179,12 @@ message OpRequestShortCircuitAccessProto {
    * The shared memory slot to use, if we are using one.
    */
   optional ShortCircuitShmSlotProto slotId = 3;
+
+  /**
+   * True if the client supports verifying that the file descriptor has been
+   * sent successfully.
+   */
+  optional bool supportsReceiptVerification = 4 [default = false];
 }
 
 message ReleaseShortCircuitAccessRequestProto {
@@ -202,6 +219,7 @@ message PacketHeaderProto {
   optional bool syncBlock = 5 [default = false];
 }
 
+// Status is a 4-bit enum
 enum Status {
   SUCCESS = 0;
   ERROR = 1;
@@ -218,10 +236,16 @@ enum Status {
   IN_PROGRESS = 12;
 }
 
+enum ShortCircuitFdResponse {
+  DO_NOT_USE_RECEIPT_VERIFICATION = 0;
+  USE_RECEIPT_VERIFICATION = 1;
+}
+
 message PipelineAckProto {
   required sint64 seqno = 1;
-  repeated Status status = 2;
+  repeated Status reply = 2;
   optional uint64 downstreamAckTimeNanos = 3 [default = 0];
+  repeated uint32 flag = 4 [packed=true];
 }
 
 /**

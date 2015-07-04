@@ -80,8 +80,8 @@ public class RMContainerTokenSecretManager extends
     if (rollingInterval <= activationDelay * 2) {
       throw new IllegalArgumentException(
           YarnConfiguration.RM_CONTAINER_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS
-              + " should be more than 2 X "
-              + YarnConfiguration.RM_CONTAINER_TOKEN_MASTER_KEY_ROLLING_INTERVAL_SECS);
+              + " should be more than 3 X "
+              + YarnConfiguration.RM_NM_EXPIRY_INTERVAL_MS);
     }
   }
 
@@ -179,7 +179,7 @@ public class RMContainerTokenSecretManager extends
       String appSubmitter, Resource capability, Priority priority,
       long createTime) {
     return createContainerToken(containerId, nodeId, appSubmitter, capability,
-      priority, createTime, null);
+      priority, createTime, null, null);
   }
 
   /**
@@ -196,7 +196,8 @@ public class RMContainerTokenSecretManager extends
    */
   public Token createContainerToken(ContainerId containerId, NodeId nodeId,
       String appSubmitter, Resource capability, Priority priority,
-      long createTime, LogAggregationContext logAggregationContext) {
+      long createTime, LogAggregationContext logAggregationContext,
+      String nodeLabelExpression) {
     byte[] password;
     ContainerTokenIdentifier tokenIdentifier;
     long expiryTimeStamp =
@@ -210,7 +211,7 @@ public class RMContainerTokenSecretManager extends
             appSubmitter, capability, expiryTimeStamp, this.currentMasterKey
               .getMasterKey().getKeyId(),
             ResourceManager.getClusterTimeStamp(), priority, createTime,
-            logAggregationContext);
+            logAggregationContext, nodeLabelExpression);
       password = this.createPassword(tokenIdentifier);
 
     } finally {

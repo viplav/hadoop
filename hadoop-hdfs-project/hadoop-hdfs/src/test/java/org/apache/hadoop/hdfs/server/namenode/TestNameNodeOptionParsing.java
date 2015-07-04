@@ -22,8 +22,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.RollingUpgradeStartupOption;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.junit.Assert;
 import org.junit.Test;
 
 public class TestNameNodeOptionParsing {
@@ -68,11 +70,11 @@ public class TestNameNodeOptionParsing {
     opt = NameNode.parseArguments(new String[] { "-upgrade", "-renameReserved"});
     assertEquals(StartupOption.UPGRADE, opt);
     assertEquals(
-        ".snapshot." + HdfsConstants.NAMENODE_LAYOUT_VERSION
+        ".snapshot." + HdfsServerConstants.NAMENODE_LAYOUT_VERSION
             + ".UPGRADE_RENAMED",
         FSImageFormat.renameReservedMap.get(".snapshot"));
     assertEquals(
-        ".reserved." + HdfsConstants.NAMENODE_LAYOUT_VERSION
+        ".reserved." + HdfsServerConstants.NAMENODE_LAYOUT_VERSION
             + ".UPGRADE_RENAMED",
         FSImageFormat.renameReservedMap.get(".reserved"));
 
@@ -102,4 +104,39 @@ public class TestNameNodeOptionParsing {
     assertNull(opt);
   }
 
+  @Test(timeout = 10000)
+  public void testRollingUpgrade() {
+    {
+      final String[] args = {"-rollingUpgrade"};
+      final StartupOption opt = NameNode.parseArguments(args);
+      assertNull(opt);
+    }
+
+    {
+      final String[] args = {"-rollingUpgrade", "started"};
+      final StartupOption opt = NameNode.parseArguments(args);
+      assertEquals(StartupOption.ROLLINGUPGRADE, opt);
+      assertEquals(RollingUpgradeStartupOption.STARTED, opt.getRollingUpgradeStartupOption());
+      assertTrue(RollingUpgradeStartupOption.STARTED.matches(opt));
+    }
+
+    {
+      final String[] args = {"-rollingUpgrade", "rollback"};
+      final StartupOption opt = NameNode.parseArguments(args);
+      assertEquals(StartupOption.ROLLINGUPGRADE, opt);
+      assertEquals(RollingUpgradeStartupOption.ROLLBACK, opt.getRollingUpgradeStartupOption());
+      assertTrue(RollingUpgradeStartupOption.ROLLBACK.matches(opt));
+    }
+
+    {
+      final String[] args = {"-rollingUpgrade", "foo"};
+      try {
+        NameNode.parseArguments(args);
+        Assert.fail();
+      } catch(IllegalArgumentException iae) {
+        // the exception is expected.
+      }
+    }
+  }
+    
 }

@@ -48,6 +48,9 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.security.token.block.InvalidBlockTokenException;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.security.token.Token;
+import org.apache.htrace.Span;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -71,7 +74,7 @@ class BlockStorageLocationUtil {
    */
   private static List<VolumeBlockLocationCallable> createVolumeBlockLocationCallables(
       Configuration conf, Map<DatanodeInfo, List<LocatedBlock>> datanodeBlocks,
-      int timeout, boolean connectToDnViaHostname) {
+      int timeout, boolean connectToDnViaHostname, Span parent) {
     
     if (datanodeBlocks.isEmpty()) {
       return Lists.newArrayList();
@@ -111,7 +114,7 @@ class BlockStorageLocationUtil {
       }
       VolumeBlockLocationCallable callable = new VolumeBlockLocationCallable(
           conf, datanode, poolId, blockIds, dnTokens, timeout, 
-          connectToDnViaHostname);
+          connectToDnViaHostname, parent);
       callables.add(callable);
     }
     return callables;
@@ -131,11 +134,11 @@ class BlockStorageLocationUtil {
   static Map<DatanodeInfo, HdfsBlocksMetadata> queryDatanodesForHdfsBlocksMetadata(
       Configuration conf, Map<DatanodeInfo, List<LocatedBlock>> datanodeBlocks,
       int poolsize, int timeoutMs, boolean connectToDnViaHostname)
-      throws InvalidBlockTokenException {
+        throws InvalidBlockTokenException {
 
     List<VolumeBlockLocationCallable> callables = 
         createVolumeBlockLocationCallables(conf, datanodeBlocks, timeoutMs, 
-            connectToDnViaHostname);
+            connectToDnViaHostname, Trace.currentSpan());
     
     // Use a thread pool to execute the Callables in parallel
     List<Future<HdfsBlocksMetadata>> futures = 
@@ -292,7 +295,7 @@ class BlockStorageLocationUtil {
       List<LocatedBlock> blocks, 
       Map<LocatedBlock, List<VolumeId>> blockVolumeIds) throws IOException {
     // Construct the final return value of VolumeBlockLocation[]
-    BlockLocation[] locations = DFSUtil.locatedBlocks2Locations(blocks);
+    BlockLocation[] locations = DFSUtilClient.locatedBlocks2Locations(blocks);
     List<BlockStorageLocation> volumeBlockLocs = 
         new ArrayList<BlockStorageLocation>(locations.length);
     for (int i = 0; i < locations.length; i++) {
@@ -319,11 +322,12 @@ class BlockStorageLocationUtil {
     private final long[] blockIds;
     private final List<Token<BlockTokenIdentifier>> dnTokens;
     private final boolean connectToDnViaHostname;
+    private final Span parentSpan;
     
     VolumeBlockLocationCallable(Configuration configuration,
         DatanodeInfo datanode, String poolId, long []blockIds,
         List<Token<BlockTokenIdentifier>> dnTokens, int timeout, 
-        boolean connectToDnViaHostname) {
+        boolean connectToDnViaHostname, Span parentSpan) {
       this.configuration = configuration;
       this.timeout = timeout;
       this.datanode = datanode;
@@ -331,6 +335,7 @@ class BlockStorageLocationUtil {
       this.blockIds = blockIds;
       this.dnTokens = dnTokens;
       this.connectToDnViaHostname = connectToDnViaHostname;
+      this.parentSpan = parentSpan;
     }
     
     public DatanodeInfo getDatanodeInfo() {
@@ -342,6 +347,8 @@ class BlockStorageLocationUtil {
       HdfsBlocksMetadata metadata = null;
       // Create the RPC proxy and make the RPC
       ClientDatanodeProtocol cdp = null;
+      TraceScope scope =
+          Trace.startSpan("getHdfsBlocksMetadata", parentSpan);
       try {
         cdp = DFSUtil.createClientDatanodeProtocolProxy(datanode, configuration,
             timeout, connectToDnViaHostname);
@@ -350,6 +357,7 @@ class BlockStorageLocationUtil {
         // Bubble this up to the caller, handle with the Future
         throw e;
       } finally {
+        scope.close();
         if (cdp != null) {
           RPC.stopProxy(cdp);
         }

@@ -55,6 +55,7 @@ import org.apache.hadoop.util.DiskChecker;
 import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.SerializedException;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
@@ -313,6 +314,41 @@ public class ContainerLocalizer {
     return status;
   }
 
+  /**
+   * Returns the JVM options to to launch the resource localizer.
+   * @param conf the configuration properties to launch the resource localizer.
+   */
+  public static List<String> getJavaOpts(Configuration conf) {
+    String opts = conf.get(YarnConfiguration.NM_CONTAINER_LOCALIZER_JAVA_OPTS_KEY,
+        YarnConfiguration.NM_CONTAINER_LOCALIZER_JAVA_OPTS_DEFAULT);
+    return Arrays.asList(opts.split(" "));
+  }
+
+  /**
+   * Adds the ContainerLocalizer arguments for a @{link ShellCommandExecutor},
+   * as expected by ContainerLocalizer.main
+   * @param command the current ShellCommandExecutor command line
+   * @param user localization user
+   * @param appId localized app id
+   * @param locId localizer id
+   * @param nmAddr nodemanager address
+   * @param localDirs list of local dirs
+   */
+  public static void buildMainArgs(List<String> command,
+      String user, String appId, String locId,
+      InetSocketAddress nmAddr, List<String> localDirs) {
+    
+    command.add(ContainerLocalizer.class.getName());
+    command.add(user);
+    command.add(appId);
+    command.add(locId);
+    command.add(nmAddr.getHostName());
+    command.add(Integer.toString(nmAddr.getPort()));
+    for(String dir : localDirs) {
+      command.add(dir);
+    }
+  }
+
   public static void main(String[] argv) throws Throwable {
     Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
     // usage: $0 user appId locId host port app_log_dir user_dir [user_dir]*
@@ -344,10 +380,15 @@ public class ContainerLocalizer {
           new ContainerLocalizer(FileContext.getLocalFSFileContext(), user,
               appId, locId, localDirs,
               RecordFactoryProvider.getRecordFactory(null));
-      System.exit(localizer.runLocalization(nmAddr));
+      int nRet = localizer.runLocalization(nmAddr);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(String.format("nRet: %d", nRet));
+      }
+      System.exit(nRet);
     } catch (Throwable e) {
       // Print error to stdout so that LCE can use it.
       e.printStackTrace(System.out);
+      LOG.error("Exception in main:", e);
       throw e;
     }
   }

@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.NoSuchElementException;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.fs.Path;
@@ -151,6 +152,13 @@ public class ConverterUtils {
   public static String toString(ContainerId cId) {
     return cId == null ? null : cId.toString();
   }
+  
+  public static NodeId toNodeIdWithDefaultPort(String nodeIdStr) {
+    if (nodeIdStr.indexOf(":") < 0) {
+      return toNodeId(nodeIdStr + ":0");
+    }
+    return toNodeId(nodeIdStr);
+  }
 
   public static NodeId toNodeId(String nodeIdStr) {
     String[] parts = nodeIdStr.split(":");
@@ -160,7 +168,7 @@ public class ConverterUtils {
     }
     try {
       NodeId nodeId =
-          NodeId.newInstance(parts[0], Integer.parseInt(parts[1]));
+          NodeId.newInstance(parts[0].trim(), Integer.parseInt(parts[1]));
       return nodeId;
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException("Invalid port: " + parts[1], e);
@@ -183,6 +191,9 @@ public class ConverterUtils {
     } catch (NumberFormatException n) {
       throw new IllegalArgumentException("Invalid AppAttemptId: "
           + applicationAttmeptIdStr, n);
+    } catch (NoSuchElementException e) {
+      throw new IllegalArgumentException("Invalid AppAttemptId: "
+          + applicationAttmeptIdStr, e);
     }
   }
   
@@ -197,8 +208,11 @@ public class ConverterUtils {
     try {
       return toApplicationId(it);
     } catch (NumberFormatException n) {
-      throw new IllegalArgumentException("Invalid AppAttemptId: "
+      throw new IllegalArgumentException("Invalid ApplicationId: "
           + appIdStr, n);
+    } catch (NoSuchElementException e) {
+      throw new IllegalArgumentException("Invalid ApplicationId: "
+          + appIdStr, e);
     }
   }
 

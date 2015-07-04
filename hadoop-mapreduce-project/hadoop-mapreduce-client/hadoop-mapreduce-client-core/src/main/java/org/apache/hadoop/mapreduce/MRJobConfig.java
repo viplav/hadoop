@@ -28,6 +28,9 @@ import org.apache.hadoop.yarn.util.Apps;
 @InterfaceStability.Evolving
 public interface MRJobConfig {
 
+  // Used by MapTask
+  public static final String MAP_SORT_CLASS = "map.sort.class";
+
   // Put all of the attribute names in here so that Job and JobContext are
   // consistent.
   public static final String INPUT_FORMAT_CLASS_ATTR = "mapreduce.job.inputformat.class";
@@ -49,6 +52,11 @@ public interface MRJobConfig {
 
   public static final String TASK_CLEANUP_NEEDED = "mapreduce.job.committer.task.cleanup.needed";
 
+  public static final String TASK_PROGRESS_REPORT_INTERVAL =
+      "mapreduce.task.progress-report.interval";
+  /** The number of milliseconds between progress reports. */
+  public static final int DEFAULT_TASK_PROGRESS_REPORT_INTERVAL = 3000;
+
   public static final String JAR = "mapreduce.job.jar";
 
   public static final String ID = "mapreduce.job.id";
@@ -62,6 +70,28 @@ public interface MRJobConfig {
   public static final String PRIORITY = "mapreduce.job.priority";
 
   public static final String QUEUE_NAME = "mapreduce.job.queuename";
+
+  /**
+   *  Node Label expression applicable for all Job containers.
+   */
+  public static final String JOB_NODE_LABEL_EXP = "mapreduce.job.node-label-expression";
+
+  /**
+   * Node Label expression applicable for AM containers.
+   */
+  public static final String AM_NODE_LABEL_EXP = "mapreduce.job.am.node-label-expression";
+
+  /**
+   *  Node Label expression applicable for map containers.
+   */
+  public static final String MAP_NODE_LABEL_EXP = "mapreduce.map.node-label-expression";
+
+  /**
+   * Node Label expression applicable for reduce containers.
+   */
+  public static final String REDUCE_NODE_LABEL_EXP = "mapreduce.reduce.node-label-expression";
+
+  public static final String RESERVATION_ID = "mapreduce.job.reservation.id";
 
   public static final String JOB_TAGS = "mapreduce.job.tags";
 
@@ -84,11 +114,40 @@ public interface MRJobConfig {
 
   public static final String SKIP_OUTDIR = "mapreduce.job.skip.outdir";
 
+  // SPECULATIVE_SLOWNODE_THRESHOLD is obsolete and will be deleted in the future
+  @Deprecated
   public static final String SPECULATIVE_SLOWNODE_THRESHOLD = "mapreduce.job.speculative.slownodethreshold";
 
   public static final String SPECULATIVE_SLOWTASK_THRESHOLD = "mapreduce.job.speculative.slowtaskthreshold";
 
+  // SPECULATIVECAP is obsolete and will be deleted in the future
+  @Deprecated
   public static final String SPECULATIVECAP = "mapreduce.job.speculative.speculativecap";
+
+  public static final String SPECULATIVECAP_RUNNING_TASKS =
+      "mapreduce.job.speculative.speculative-cap-running-tasks";
+  public static final double DEFAULT_SPECULATIVECAP_RUNNING_TASKS =
+      0.1;
+
+  public static final String SPECULATIVECAP_TOTAL_TASKS =
+      "mapreduce.job.speculative.speculative-cap-total-tasks";
+  public static final double DEFAULT_SPECULATIVECAP_TOTAL_TASKS =
+      0.01;
+
+  public static final String SPECULATIVE_MINIMUM_ALLOWED_TASKS =
+      "mapreduce.job.speculative.minimum-allowed-tasks";
+  public static final int DEFAULT_SPECULATIVE_MINIMUM_ALLOWED_TASKS =
+      10;
+
+  public static final String SPECULATIVE_RETRY_AFTER_NO_SPECULATE =
+      "mapreduce.job.speculative.retry-after-no-speculate";
+  public static final long DEFAULT_SPECULATIVE_RETRY_AFTER_NO_SPECULATE =
+      1000L;
+
+  public static final String SPECULATIVE_RETRY_AFTER_SPECULATE =
+      "mapreduce.job.speculative.retry-after-speculate";
+  public static final long DEFAULT_SPECULATIVE_RETRY_AFTER_SPECULATE =
+      15000L;
 
   public static final String JOB_LOCAL_DIR = "mapreduce.job.local.dir";
 
@@ -164,8 +223,6 @@ public interface MRJobConfig {
 
   public static final String PRESERVE_FILES_PATTERN = "mapreduce.task.files.preserve.filepattern";
 
-  public static final String TASK_TEMP_DIR = "mapreduce.task.tmp.dir";
-
   public static final String TASK_DEBUGOUT_LINES = "mapreduce.task.debugout.lines";
 
   public static final String RECORDS_BEFORE_PROGRESS = "mapreduce.task.merge.progress.records";
@@ -175,12 +232,17 @@ public interface MRJobConfig {
   public static final String TASK_ATTEMPT_ID = "mapreduce.task.attempt.id";
 
   public static final String TASK_ISMAP = "mapreduce.task.ismap";
+  public static final boolean DEFAULT_TASK_ISMAP = true;
 
   public static final String TASK_PARTITION = "mapreduce.task.partition";
 
   public static final String TASK_PROFILE = "mapreduce.task.profile";
 
   public static final String TASK_PROFILE_PARAMS = "mapreduce.task.profile.params";
+
+  public static final String DEFAULT_TASK_PROFILE_PARAMS =
+      "-agentlib:hprof=cpu=samples,heap=sites,force=n,thread=y,"
+          + "verbose=n,file=%s";
 
   public static final String NUM_MAP_PROFILES = "mapreduce.task.profile.maps";
 
@@ -193,7 +255,15 @@ public interface MRJobConfig {
   public static final String TASK_TIMEOUT = "mapreduce.task.timeout";
 
   public static final String TASK_TIMEOUT_CHECK_INTERVAL_MS = "mapreduce.task.timeout.check-interval-ms";
-  
+
+  public static final String TASK_EXIT_TIMEOUT = "mapreduce.task.exit.timeout";
+
+  public static final int TASK_EXIT_TIMEOUT_DEFAULT = 60 * 1000;
+
+  public static final String TASK_EXIT_TIMEOUT_CHECK_INTERVAL_MS = "mapreduce.task.exit.timeout.check-interval-ms";
+
+  public static final int TASK_EXIT_TIMEOUT_CHECK_INTERVAL_MS_DEFAULT = 20 * 1000;
+
   public static final String TASK_ID = "mapreduce.task.id";
 
   public static final String TASK_OUTPUT_DIR = "mapreduce.task.output.dir";
@@ -271,6 +341,7 @@ public interface MRJobConfig {
     = "mapreduce.reduce.shuffle.memory.limit.percent";
 
   public static final String SHUFFLE_MERGE_PERCENT = "mapreduce.reduce.shuffle.merge.percent";
+  public static final float DEFAULT_SHUFFLE_MERGE_PERCENT = 0.66f;
 
   public static final String REDUCE_FAILURES_MAXPERCENT = "mapreduce.reduce.failures.maxpercent";
 
@@ -327,6 +398,8 @@ public interface MRJobConfig {
 
   public static final String JOB_NAMENODES = "mapreduce.job.hdfs-servers";
 
+  public static final String JOB_NAMENODES_TOKEN_RENEWAL_EXCLUDE = "mapreduce.job.hdfs-servers.token-renewal.exclude";
+
   public static final String JOB_JOBTRACKER_ID = "mapreduce.job.kerberos.jtprinicipal";
 
   public static final String JOB_CANCEL_DELEGATION_TOKEN = "mapreduce.job.complete.cancel.delegation.tokens";
@@ -339,6 +412,14 @@ public interface MRJobConfig {
 
   public static final String DEFAULT_JOB_ACL_MODIFY_JOB = " ";
   
+  public static final String JOB_RUNNING_MAP_LIMIT =
+      "mapreduce.job.running.map.limit";
+  public static final int DEFAULT_JOB_RUNNING_MAP_LIMIT = 0;
+
+  public static final String JOB_RUNNING_REDUCE_LIMIT =
+      "mapreduce.job.running.reduce.limit";
+  public static final int DEFAULT_JOB_RUNNING_REDUCE_LIMIT = 0;
+
   /* config for tracking the local file where all the credentials for the job
    * credentials.
    */
@@ -377,6 +458,11 @@ public interface MRJobConfig {
   public static final String JOB_UBERTASK_MAXBYTES =
     "mapreduce.job.ubertask.maxbytes";
 
+  public static final String MAPREDUCE_JOB_EMIT_TIMELINE_DATA =
+    "mapreduce.job.emit-timeline-data";
+  public static final boolean DEFAULT_MAPREDUCE_JOB_EMIT_TIMELINE_DATA =
+      false;
+
   public static final String MR_PREFIX = "yarn.app.mapreduce.";
 
   public static final String MR_AM_PREFIX = MR_PREFIX + "am.";
@@ -392,7 +478,7 @@ public interface MRJobConfig {
    * reconnecting to the RM to fetch Application Status.
    */
   public static final String MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS =
-    MR_PREFIX + "yarn.app.mapreduce.client-am.ipc.max-retries-on-timeouts";
+    MR_PREFIX + "client-am.ipc.max-retries-on-timeouts";
   public static final int
     DEFAULT_MR_CLIENT_TO_AM_IPC_MAX_RETRIES_ON_TIMEOUTS = 3;
 
@@ -403,6 +489,21 @@ public interface MRJobConfig {
     MR_PREFIX + "client.max-retries";
   public static final int DEFAULT_MR_CLIENT_MAX_RETRIES = 3;
   
+  /**
+   * How many times to retry jobclient calls (via getjob)
+   */
+  public static final String MR_CLIENT_JOB_MAX_RETRIES =
+      MR_PREFIX + "client.job.max-retries";
+  public static final int DEFAULT_MR_CLIENT_JOB_MAX_RETRIES = 0;
+
+  /**
+   * How long to wait between jobclient retries on failure
+   */
+  public static final String MR_CLIENT_JOB_RETRY_INTERVAL =
+      MR_PREFIX + "client.job.retry-interval";
+  public static final long DEFAULT_MR_CLIENT_JOB_RETRY_INTERVAL =
+      2000;
+
   /** The staging directory for map reduce.*/
   public static final String MR_AM_STAGING_DIR = 
     MR_AM_PREFIX+"staging-dir";
@@ -456,6 +557,14 @@ public interface MRJobConfig {
 
   public static final int DEFAULT_MR_AM_CONTAINERLAUNCHER_THREAD_COUNT_LIMIT = 
       500;
+
+  /**
+   * The initial size of thread pool to launch containers in the app master
+   */
+  public static final String MR_AM_CONTAINERLAUNCHER_THREADPOOL_INITIAL_SIZE =
+      MR_AM_PREFIX+"containerlauncher.threadpool-initial-size";
+  public static final int DEFAULT_MR_AM_CONTAINERLAUNCHER_THREADPOOL_INITIAL_SIZE =
+      10;
 
   /** Number of threads to handle job client RPC requests.*/
   public static final String MR_AM_JOB_CLIENT_THREAD_COUNT =
@@ -597,6 +706,11 @@ public interface MRJobConfig {
   public static final int DEFAULT_MR_AM_HISTORY_USE_BATCHED_FLUSH_QUEUE_SIZE_THRESHOLD =
       50;
 
+  public static final String MR_AM_HARD_KILL_TIMEOUT_MS =
+      MR_AM_PREFIX + "hard-kill-timeout-ms";
+  public static final long DEFAULT_MR_AM_HARD_KILL_TIMEOUT_MS =
+      10 * 1000l;
+
   /**
    * The threshold in terms of seconds after which an unsatisfied mapper request
    * triggers reducer preemption to free space. Default 0 implies that the reduces
@@ -612,7 +726,12 @@ public interface MRJobConfig {
   
   public static final String MR_AM_ADMIN_USER_ENV =
       MR_AM_PREFIX + "admin.user.env";
-  
+
+  public static final String MR_AM_PROFILE = MR_AM_PREFIX + "profile";
+  public static final boolean DEFAULT_MR_AM_PROFILE = false;
+  public static final String MR_AM_PROFILE_PARAMS = MR_AM_PREFIX
+      + "profile.params";
+
   public static final String MAPRED_MAP_ADMIN_JAVA_OPTS =
       "mapreduce.admin.map.child.java.opts";
 
@@ -714,6 +833,9 @@ public interface MRJobConfig {
    */
   public static final String MAPREDUCE_APPLICATION_CLASSPATH = 
       "mapreduce.application.classpath";
+  
+  public static final String MAPREDUCE_JOB_LOG4J_PROPERTIES_FILE = 
+      "mapreduce.job.log4j-properties-file";
 
   /**
    * Path to MapReduce framework archive
@@ -754,6 +876,18 @@ public interface MRJobConfig {
       MR_PREFIX + "task.container.log.backups";
   public static final int DEFAULT_TASK_LOG_BACKUPS = 0; // don't roll
 
+  public static final String REDUCE_SEPARATE_SHUFFLE_LOG =
+      MR_PREFIX + "shuffle.log.separate";
+  public static final boolean DEFAULT_REDUCE_SEPARATE_SHUFFLE_LOG = true;
+
+  public static final String SHUFFLE_LOG_BACKUPS =
+      MR_PREFIX + "shuffle.log.backups";
+  public static final int DEFAULT_SHUFFLE_LOG_BACKUPS = 0; // don't roll
+
+  public static final String SHUFFLE_LOG_KB =
+      MR_PREFIX + "shuffle.log.limit.kb";
+  public static final long DEFAULT_SHUFFLE_LOG_KB = 0L;
+
   public static final String WORKFLOW_NAME = "mapreduce.workflow.name";
   
   public static final String WORKFLOW_NODE_NAME =
@@ -780,6 +914,11 @@ public interface MRJobConfig {
   public static final String TASK_PREEMPTION =
       "mapreduce.job.preemption";
 
+  public static final String HEAP_MEMORY_MB_RATIO =
+      "mapreduce.job.heap.memory-mb.ratio";
+
+  public static final float DEFAULT_HEAP_MEMORY_MB_RATIO = 0.8f;
+
   public static final String MR_ENCRYPTED_INTERMEDIATE_DATA =
       "mapreduce.job.encrypted-intermediate-data";
   public static final boolean DEFAULT_MR_ENCRYPTED_INTERMEDIATE_DATA = false;
@@ -793,4 +932,5 @@ public interface MRJobConfig {
       "mapreduce.job.encrypted-intermediate-data.buffer.kb";
   public static final int DEFAULT_MR_ENCRYPTED_INTERMEDIATE_DATA_BUFFER_KB =
           128;
+
 }

@@ -149,9 +149,15 @@ public class WindowsResourceCalculatorPlugin extends ResourceCalculatorPlugin {
 
   /** {@inheritDoc} */
   @Override
+  public int getNumCores() {
+    return getNumProcessors();
+  }
+
+  /** {@inheritDoc} */
+  @Override
   public long getCpuFrequency() {
     refreshIfNeeded();
-    return -1;
+    return cpuFrequencyKhz;
   }
 
   /** {@inheritDoc} */

@@ -21,6 +21,8 @@ package org.apache.hadoop.fs;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.htrace.NullScope;
+import org.apache.htrace.TraceScope;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -51,7 +53,7 @@ abstract public class FSOutputSummer extends OutputStream {
   protected FSOutputSummer(DataChecksum sum) {
     this.sum = sum;
     this.buf = new byte[sum.getBytesPerChecksum() * BUFFER_NUM_CHUNKS];
-    this.checksum = new byte[sum.getChecksumSize() * BUFFER_NUM_CHUNKS];
+    this.checksum = new byte[getChecksumSize() * BUFFER_NUM_CHUNKS];
     this.count = 0;
   }
   
@@ -90,7 +92,7 @@ abstract public class FSOutputSummer extends OutputStream {
    * in a checksum chunk are in the buffer.  If the buffer is empty and
    * requested length is at least as large as the size of next checksum chunk
    * size, this method will checksum and write the chunk directly 
-   * to the underlying output stream.  Thus it avoids uneccessary data copy.
+   * to the underlying output stream.  Thus it avoids unnecessary data copy.
    *
    * @param      b     the data.
    * @param      off   the start offset in the data.
@@ -165,7 +167,7 @@ abstract public class FSOutputSummer extends OutputStream {
         count = partialLen;
         System.arraycopy(buf, bufLen - count, buf, 0, count);
       } else {
-      count = 0;
+        count = 0;
       }
     }
 
@@ -188,18 +190,32 @@ abstract public class FSOutputSummer extends OutputStream {
   protected synchronized int getBufferedDataSize() {
     return count;
   }
-  
+
+  /** @return the size for a checksum. */
+  protected int getChecksumSize() {
+    return sum.getChecksumSize();
+  }
+
+  protected TraceScope createWriteTraceScope() {
+    return NullScope.INSTANCE;
+  }
+
   /** Generate checksums for the given data chunks and output chunks & checksums
    * to the underlying output stream.
    */
   private void writeChecksumChunks(byte b[], int off, int len)
   throws IOException {
     sum.calculateChunkedSums(b, off, len, checksum, 0);
-    for (int i = 0; i < len; i += sum.getBytesPerChecksum()) {
-      int chunkLen = Math.min(sum.getBytesPerChecksum(), len - i);
-      int ckOffset = i / sum.getBytesPerChecksum() * sum.getChecksumSize();
-      writeChunk(b, off + i, chunkLen, checksum, ckOffset,
-          sum.getChecksumSize());
+    TraceScope scope = createWriteTraceScope();
+    try {
+      for (int i = 0; i < len; i += sum.getBytesPerChecksum()) {
+        int chunkLen = Math.min(sum.getBytesPerChecksum(), len - i);
+        int ckOffset = i / sum.getBytesPerChecksum() * getChecksumSize();
+        writeChunk(b, off + i, chunkLen, checksum, ckOffset,
+            getChecksumSize());
+      }
+    } finally {
+      scope.close();
     }
   }
 
@@ -226,8 +242,7 @@ abstract public class FSOutputSummer extends OutputStream {
    */
   protected synchronized void setChecksumBufSize(int size) {
     this.buf = new byte[size];
-    this.checksum = new byte[((size - 1) / sum.getBytesPerChecksum() + 1) *
-        sum.getChecksumSize()];
+    this.checksum = new byte[sum.getChecksumSize(size)];
     this.count = 0;
   }
 

@@ -30,6 +30,7 @@ import org.apache.hadoop.fs.FSInputChecker;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.ReadOption;
 import org.apache.hadoop.hdfs.net.Peer;
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.datatransfer.DataTransferProtoUtil;
@@ -46,6 +47,9 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.htrace.Sampler;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 
 /**
@@ -69,6 +73,8 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
   /** offset in block where reader wants to actually read */
   private long startOffset;
 
+  private final long blockId;
+
   /** offset in block of of first chunk - may be less than startOffset
       if startOffset is not chunk-aligned */
   private final long firstChunkOffset;
@@ -91,7 +97,6 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
   private boolean eos = false;
   private boolean sentStatusCode = false;
   
-  byte[] skipBuf = null;
   ByteBuffer checksumBytes = null;
   /** Amount of unread data in the current received packet */
   int dataLeft = 0;
@@ -120,10 +125,7 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
     if (lastChunkLen < 0 && startOffset > firstChunkOffset && len > 0) {
       // Skip these bytes. But don't call this.skip()!
       int toSkip = (int)(startOffset - firstChunkOffset);
-      if ( skipBuf == null ) {
-        skipBuf = new byte[bytesPerChecksum];
-      }
-      if ( super.read(skipBuf, 0, toSkip) != toSkip ) {
+      if ( super.readAndDiscard(toSkip) != toSkip ) {
         // should never happen
         throw new IOException("Could not skip required number of bytes");
       }
@@ -146,15 +148,11 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
   public synchronized long skip(long n) throws IOException {
     /* How can we make sure we don't throw a ChecksumException, at least
      * in majority of the cases?. This one throws. */  
-    if ( skipBuf == null ) {
-      skipBuf = new byte[bytesPerChecksum]; 
-    }
-
     long nSkipped = 0;
-    while ( nSkipped < n ) {
-      int toSkip = (int)Math.min(n-nSkipped, skipBuf.length);
-      int ret = read(skipBuf, 0, toSkip);
-      if ( ret <= 0 ) {
+    while (nSkipped < n) {
+      int toSkip = (int)Math.min(n-nSkipped, Integer.MAX_VALUE);
+      int ret = readAndDiscard(toSkip);
+      if (ret <= 0) {
         return nSkipped;
       }
       nSkipped += ret;
@@ -208,6 +206,19 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
   protected synchronized int readChunk(long pos, byte[] buf, int offset, 
                                        int len, byte[] checksumBuf) 
                                        throws IOException {
+    TraceScope scope =
+        Trace.startSpan("RemoteBlockReader#readChunk(" + blockId + ")",
+            Sampler.NEVER);
+    try {
+      return readChunkImpl(pos, buf, offset, len, checksumBuf);
+    } finally {
+      scope.close();
+    }
+  }
+
+  private synchronized int readChunkImpl(long pos, byte[] buf, int offset,
+                                     int len, byte[] checksumBuf)
+                                     throws IOException {
     // Read one chunk.
     if (eos) {
       // Already hit EOF
@@ -333,7 +344,8 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
       long startOffset, long firstChunkOffset, long bytesToRead, Peer peer,
       DatanodeID datanodeID, PeerCache peerCache) {
     // Path is used only for printing block and file information in debug
-    super(new Path("/blk_" + blockId + ":" + bpid + ":of:"+ file)/*too non path-like?*/,
+    super(new Path("/" + Block.BLOCK_FILE_PREFIX + blockId +
+                    ":" + bpid + ":of:"+ file)/*too non path-like?*/,
           1, verifyChecksum,
           checksum.getChecksumSize() > 0? checksum : null, 
           checksum.getBytesPerChecksum(),
@@ -347,6 +359,7 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
     this.in = in;
     this.checksum = checksum;
     this.startOffset = Math.max( startOffset, 0 );
+    this.blockId = blockId;
 
     // The total number of bytes that we need to transfer from the DN is
     // the amount that the user wants (bytesToRead), plus the padding at
@@ -367,7 +380,6 @@ public class RemoteBlockReader extends FSInputChecker implements BlockReader {
    * Create a new BlockReader specifically to satisfy a read.
    * This method also sends the OP_READ_BLOCK request.
    *
-   * @param sock  An established Socket to the DN. The BlockReader will not close it normally
    * @param file  File location
    * @param block  The block object
    * @param blockToken  The block token for security

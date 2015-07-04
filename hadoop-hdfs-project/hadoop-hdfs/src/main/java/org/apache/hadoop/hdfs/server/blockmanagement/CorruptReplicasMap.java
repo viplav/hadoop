@@ -73,18 +73,15 @@ public class CorruptReplicasMap{
     }
     
     if (!nodes.keySet().contains(dn)) {
-      NameNode.blockStateChangeLog.info("BLOCK NameSystem.addToCorruptReplicasMap: "+
-                                   blk.getBlockName() +
-                                   " added as corrupt on " + dn +
-                                   " by " + Server.getRemoteIp() +
-                                   reasonText);
+      NameNode.blockStateChangeLog.info(
+          "BLOCK NameSystem.addToCorruptReplicasMap: {} added as corrupt on "
+              + "{} by {} {}", blk.getBlockName(), dn, Server.getRemoteIp(),
+          reasonText);
     } else {
-      NameNode.blockStateChangeLog.info("BLOCK NameSystem.addToCorruptReplicasMap: "+
-                                   "duplicate requested for " + 
-                                   blk.getBlockName() + " to add as corrupt " +
-                                   "on " + dn +
-                                   " by " + Server.getRemoteIp() +
-                                   reasonText);
+      NameNode.blockStateChangeLog.info(
+          "BLOCK NameSystem.addToCorruptReplicasMap: duplicate requested for" +
+              " {} to add as corrupt on {} by {} {}", blk.getBlockName(), dn,
+              Server.getRemoteIp(), reasonText);
     }
     // Add the node or update the reason.
     nodes.put(dn, reasonCode);
@@ -223,5 +220,26 @@ public class CorruptReplicasMap{
     }
     
     return ret;
-  }  
+  }
+
+  /**
+   * return the reason about corrupted replica for a given block
+   * on a given dn
+   * @param block block that has corrupted replica
+   * @param node datanode that contains this corrupted replica
+   * @return reason
+   */
+  String getCorruptReason(Block block, DatanodeDescriptor node) {
+    Reason reason = null;
+    if(corruptReplicasMap.containsKey(block)) {
+      if (corruptReplicasMap.get(block).containsKey(node)) {
+        reason = corruptReplicasMap.get(block).get(node);
+      }
+    }
+    if (reason != null) {
+      return reason.toString();
+    } else {
+      return null;
+    }
+  }
 }

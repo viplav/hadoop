@@ -21,8 +21,11 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.yarn.server.resourcemanager.metrics.SystemMetricsPublisher;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
+
 import static org.mockito.Matchers.isA;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyLong;
@@ -32,12 +35,12 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 
 import org.junit.Assert;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.yarn.MockApps;
@@ -59,6 +62,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.MockRMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
@@ -66,6 +70,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
+import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.After;
 import org.junit.Before;
@@ -207,6 +212,7 @@ public class TestAppManager{
   private ApplicationSubmissionContext asContext;
   private ApplicationId appId;
 
+  @SuppressWarnings("deprecation")
   @Before
   public void setUp() {
     long now = System.currentTimeMillis();
@@ -476,6 +482,63 @@ public class TestAppManager{
         getAppEventType());
   }
 
+  @Test
+  public void testRMAppSubmitWithInvalidTokens() throws Exception {
+    // Setup invalid security tokens
+    DataOutputBuffer dob = new DataOutputBuffer();
+    ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
+        dob.getLength());
+    asContext.getAMContainerSpec().setTokens(securityTokens);
+    try {
+      appMonitor.submitApplication(asContext, "test");
+      Assert.fail("Application submission should fail because" +
+          " Tokens are invalid.");
+    } catch (YarnException e) {
+      // Exception is expected
+      Assert.assertTrue("The thrown exception is not" +
+          " java.io.EOFException",
+          e.getMessage().contains("java.io.EOFException"));
+    }
+    int timeoutSecs = 0;
+    while ((getAppEventType() == RMAppEventType.KILL) &&
+        timeoutSecs++ < 20) {
+      Thread.sleep(1000);
+    }
+    Assert.assertEquals("app event type sent is wrong",
+        RMAppEventType.APP_REJECTED, getAppEventType());
+    asContext.getAMContainerSpec().setTokens(null);
+  }
+
+  @Test
+  public void testRMAppSubmitWithValidTokens() throws Exception {
+    // Setup valid security tokens
+    DataOutputBuffer dob = new DataOutputBuffer();
+    Credentials credentials = new Credentials();
+    credentials.writeTokenStorageToStream(dob);
+    ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
+        dob.getLength());
+    asContext.getAMContainerSpec().setTokens(securityTokens);
+    appMonitor.submitApplication(asContext, "test");
+    RMApp app = rmContext.getRMApps().get(appId);
+    Assert.assertNotNull("app is null", app);
+    Assert.assertEquals("app id doesn't match", appId,
+        app.getApplicationId());
+    Assert.assertEquals("app state doesn't match", RMAppState.NEW,
+        app.getState());
+    verify(metricsPublisher).appACLsUpdated(
+        any(RMApp.class), any(String.class), anyLong());
+
+    // wait for event to be processed
+    int timeoutSecs = 0;
+    while ((getAppEventType() == RMAppEventType.KILL) &&
+        timeoutSecs++ < 20) {
+      Thread.sleep(1000);
+    }
+    Assert.assertEquals("app event type sent is wrong", RMAppEventType.START,
+        getAppEventType());
+    asContext.getAMContainerSpec().setTokens(null);
+  }
+
   @Test (timeout = 30000)
   public void testRMAppSubmitMaxAppAttempts() throws Exception {
     int[] globalMaxAppAttempts = new int[] { 10, 1 };
@@ -540,6 +603,7 @@ public class TestAppManager{
     Assert.assertEquals("app state doesn't match", RMAppState.FINISHED, app.getState());
   }
 
+  @SuppressWarnings("deprecation")
   @Test (timeout = 30000)
   public void testRMAppSubmitInvalidResourceRequest() throws Exception {
     asContext.setResource(Resources.createResource(
@@ -569,6 +633,10 @@ public class TestAppManager{
     when(app.getUser()).thenReturn("Multiline\n\n\r\rUserName");
     when(app.getQueue()).thenReturn("Multiline\n\n\r\rQueueName");
     when(app.getState()).thenReturn(RMAppState.RUNNING);
+    when(app.getApplicationType()).thenReturn("MAPREDUCE");
+    RMAppMetrics metrics =
+        new RMAppMetrics(Resource.newInstance(1234, 56), 10, 1, 16384, 64);
+    when(app.getRMAppMetrics()).thenReturn(metrics);
 
     RMAppManager.ApplicationSummary.SummaryBuilder summary =
         new RMAppManager.ApplicationSummary().createAppSummary(app);
@@ -581,7 +649,13 @@ public class TestAppManager{
     Assert.assertTrue(msg.contains("Multiline" + escaped +"AppName"));
     Assert.assertTrue(msg.contains("Multiline" + escaped +"UserName"));
     Assert.assertTrue(msg.contains("Multiline" + escaped +"QueueName"));
-  }
+    Assert.assertTrue(msg.contains("memorySeconds=16384"));
+    Assert.assertTrue(msg.contains("vcoreSeconds=64"));
+    Assert.assertTrue(msg.contains("preemptedAMContainers=1"));
+    Assert.assertTrue(msg.contains("preemptedNonAMContainers=10"));
+    Assert.assertTrue(msg.contains("preemptedResources=<memory:1234\\, vCores:56>"));
+    Assert.assertTrue(msg.contains("applicationType=MAPREDUCE"));
+ }
 
   private static ResourceScheduler mockResourceScheduler() {
     ResourceScheduler scheduler = mock(ResourceScheduler.class);
@@ -591,6 +665,10 @@ public class TestAppManager{
     when(scheduler.getMaximumResourceCapability()).thenReturn(
         Resources.createResource(
             YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_MB));
+
+    ResourceCalculator rs = mock(ResourceCalculator.class);
+    when(scheduler.getResourceCalculator()).thenReturn(rs);
+
     return scheduler;
   }
 

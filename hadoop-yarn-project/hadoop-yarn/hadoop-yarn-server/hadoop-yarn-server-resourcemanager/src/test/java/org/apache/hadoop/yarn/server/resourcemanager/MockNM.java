@@ -51,7 +51,7 @@ public class MockNM {
   private final int memory;
   private final int vCores;
   private ResourceTrackerService resourceTracker;
-  private final int httpPort = 2;
+  private int httpPort = 2;
   private MasterKey currentContainerTokenMasterKey;
   private MasterKey currentNMTokenMasterKey;
   private String version;
@@ -87,6 +87,10 @@ public class MockNM {
     return httpPort;
   }
   
+  public void setHttpPort(int port) {
+    httpPort = port;
+  }
+
   public void setResourceTrackerService(ResourceTrackerService resourceTracker) {
     this.resourceTracker = resourceTracker;
   }
@@ -134,7 +138,7 @@ public class MockNM {
   }
 
   public NodeHeartbeatResponse nodeHeartbeat(ApplicationAttemptId attemptId,
-      int containerId, ContainerState containerState) throws Exception {
+      long containerId, ContainerState containerState) throws Exception {
     HashMap<ApplicationId, List<ContainerStatus>> nodeUpdate =
         new HashMap<ApplicationId, List<ContainerStatus>>(1);
     ContainerStatus containerStatus = BuilderUtils.newContainerStatus(

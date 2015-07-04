@@ -40,7 +40,7 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ShortCircuitShmR
 import org.apache.hadoop.hdfs.protocolPB.PBHelper;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
-import org.htrace.TraceScope;
+import org.apache.htrace.TraceScope;
 
 /** Receiver */
 @InterfaceAudience.Private
@@ -148,10 +148,13 @@ public abstract class Receiver implements DataTransferProtocol {
           fromProto(proto.getRequestedChecksum()),
           (proto.hasCachingStrategy() ?
               getCachingStrategy(proto.getCachingStrategy()) :
-            CachingStrategy.newDefaultStrategy()));
-     } finally {
-      if (traceScope != null) traceScope.close();
-     }
+            CachingStrategy.newDefaultStrategy()),
+          (proto.hasAllowLazyPersist() ? proto.getAllowLazyPersist() : false),
+          (proto.hasPinning() ? proto.getPinning(): false),
+          (PBHelper.convertBooleanList(proto.getTargetPinningsList())));
+    } finally {
+     if (traceScope != null) traceScope.close();
+    }
   }
 
   /** Receive {@link Op#TRANSFER_BLOCK} */
@@ -183,7 +186,8 @@ public abstract class Receiver implements DataTransferProtocol {
     try {
       requestShortCircuitFds(PBHelper.convert(proto.getHeader().getBlock()),
           PBHelper.convert(proto.getHeader().getToken()),
-          slotId, proto.getMaxVersion());
+          slotId, proto.getMaxVersion(),
+          proto.getSupportsReceiptVerification());
     } finally {
       if (traceScope != null) traceScope.close();
     }

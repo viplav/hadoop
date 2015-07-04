@@ -23,6 +23,7 @@ import java.io.File;
 import java.io.IOException;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -40,7 +41,9 @@ import com.google.common.base.Preconditions;
  * Utility class for accessing package-private DataNode information during tests.
  *
  */
-public class DataNodeTestUtils {  
+public class DataNodeTestUtils {
+  private static final String DIR_FAILURE_SUFFIX = ".origin";
+
   public static DatanodeRegistration 
   getDNRegistrationForBP(DataNode dn, String bpid) throws IOException {
     return dn.getDNRegistrationForBP(bpid);
@@ -49,6 +52,16 @@ public class DataNodeTestUtils {
   public static void setHeartbeatsDisabledForTests(DataNode dn,
       boolean heartbeatsDisabledForTests) {
     dn.setHeartbeatsDisabledForTests(heartbeatsDisabledForTests);
+  }
+
+  /**
+   * Set if cache reports are disabled for all DNs in a mini cluster.
+   */
+  public static void setCacheReportsDisabledForTests(MiniDFSCluster cluster,
+      boolean disabled) {
+    for (DataNode dn : cluster.getDataNodes()) {
+      dn.setCacheReportsDisabledForTest(disabled);
+    }
   }
 
   public static void triggerDeletionReport(DataNode dn) throws IOException {
@@ -113,30 +126,6 @@ public class DataNodeTestUtils {
     return DataNode.createInterDataNodeProtocolProxy(datanodeid, conf,
         dn.getDnConf().socketTimeout, dn.getDnConf().connectToDnViaHostname);
   }
-  
-  public static void runBlockScannerForBlock(DataNode dn, ExtendedBlock b) {
-    BlockPoolSliceScanner bpScanner = getBlockPoolScanner(dn, b);
-    bpScanner.verifyBlock(new ExtendedBlock(b.getBlockPoolId(),
-        new BlockPoolSliceScanner.BlockScanInfo(b.getLocalBlock())));
-  }
-
-  private static BlockPoolSliceScanner getBlockPoolScanner(DataNode dn,
-      ExtendedBlock b) {
-    DataBlockScanner scanner = dn.getBlockScanner();
-    BlockPoolSliceScanner bpScanner = scanner.getBPScanner(b.getBlockPoolId());
-    return bpScanner;
-  }
-
-  public static long getLatestScanTime(DataNode dn, ExtendedBlock b) {
-    BlockPoolSliceScanner scanner = getBlockPoolScanner(dn, b);
-    return scanner.getLastScanTime(b.getLocalBlock());
-  }
-
-  public static void shutdownBlockScanner(DataNode dn) {
-    if (dn.blockScanner != null) {
-      dn.blockScanner.shutdown();
-    }
-  }
 
   /**
    * This method is used for testing. 
@@ -182,5 +171,69 @@ public class DataNodeTestUtils {
   public static ReplicaInfo fetchReplicaInfo(final DataNode dn,
       final String bpid, final long blkId) {
     return FsDatasetTestUtil.fetchReplicaInfo(dn.getFSDataset(), bpid, blkId);
+  }
+
+  /**
+   * It injects disk failures to data dirs by replacing these data dirs with
+   * regular files.
+   *
+   * @param dirs data directories.
+   * @throws IOException on I/O error.
+   */
+  public static void injectDataDirFailure(File... dirs) throws IOException {
+    for (File dir : dirs) {
+      File renamedTo = new File(dir.getPath() + DIR_FAILURE_SUFFIX);
+      if (renamedTo.exists()) {
+        throw new IOException(String.format(
+            "Can not inject failure to dir: %s because %s exists.",
+            dir, renamedTo));
+      }
+      if (!dir.renameTo(renamedTo)) {
+        throw new IOException(String.format("Failed to rename %s to %s.",
+            dir, renamedTo));
+      }
+      if (!dir.createNewFile()) {
+        throw new IOException(String.format(
+            "Failed to create file %s to inject disk failure.", dir));
+      }
+    }
+  }
+
+  /**
+   * Restore the injected data dir failures.
+   *
+   * @see {@link #injectDataDirFailures}.
+   * @param dirs data directories.
+   * @throws IOException
+   */
+  public static void restoreDataDirFromFailure(File... dirs)
+      throws IOException {
+    for (File dir : dirs) {
+      File renamedDir = new File(dir.getPath() + DIR_FAILURE_SUFFIX);
+      if (renamedDir.exists()) {
+        if (dir.exists()) {
+          if (!dir.isFile()) {
+            throw new IOException(
+                "Injected failure data dir is supposed to be file: " + dir);
+          }
+          if (!dir.delete()) {
+            throw new IOException(
+                "Failed to delete injected failure data dir: " + dir);
+          }
+        }
+        if (!renamedDir.renameTo(dir)) {
+          throw new IOException(String.format(
+              "Failed to recover injected failure data dir %s to %s.",
+              renamedDir, dir));
+        }
+      }
+    }
+  }
+  
+  public static void runDirectoryScanner(DataNode dn) throws IOException {
+    DirectoryScanner directoryScanner = dn.getDirectoryScanner();
+    if (directoryScanner != null) {
+      dn.getDirectoryScanner().reconcile();
+    }
   }
 }

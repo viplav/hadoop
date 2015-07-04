@@ -33,6 +33,7 @@ import static org.apache.hadoop.fs.permission.FsAction.WRITE;
 import static org.apache.hadoop.fs.permission.FsAction.WRITE_EXECUTE;
 import static org.apache.hadoop.hdfs.server.namenode.AclTestHelpers.aclEntry;
 import static org.junit.Assert.fail;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -41,10 +42,12 @@ import java.io.IOException;
 import java.util.Arrays;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -73,7 +76,7 @@ public class TestFSPermissionChecker {
   private INodeDirectory inodeRoot;
 
   @Before
-  public void setUp() {
+  public void setUp() throws IOException {
     Configuration conf = new Configuration();
     FSNamesystem fsn = mock(FSNamesystem.class);
     doAnswer(new Answer() {
@@ -400,19 +403,25 @@ public class TestFSPermissionChecker {
 
   private void assertPermissionGranted(UserGroupInformation user, String path,
       FsAction access) throws IOException {
-    new FSPermissionChecker(SUPERUSER, SUPERGROUP, user).checkPermission(path,
-      dir, false, null, null, access, null, false, true);
+    INodesInPath iip = dir.getINodesInPath(path, true);
+    dir.getPermissionChecker(SUPERUSER, SUPERGROUP, user).checkPermission(iip,
+      false, null, null, access, null, false);
   }
 
   private void assertPermissionDenied(UserGroupInformation user, String path,
       FsAction access) throws IOException {
     try {
-      new FSPermissionChecker(SUPERUSER, SUPERGROUP, user).checkPermission(path,
-        dir, false, null, null, access, null, false, true);
+      INodesInPath iip = dir.getINodesInPath(path, true);
+      dir.getPermissionChecker(SUPERUSER, SUPERGROUP, user).checkPermission(iip,
+        false, null, null, access, null, false);
       fail("expected AccessControlException for user + " + user + ", path = " +
         path + ", access = " + access);
     } catch (AccessControlException e) {
-      // expected
+      assertTrue("Permission denied messages must carry the username",
+              e.getMessage().contains(user.getUserName().toString()));
+      assertTrue("Permission denied messages must carry the path parent",
+              e.getMessage().contains(
+                  new Path(path).getParent().toUri().getPath()));
     }
   }
 
@@ -421,7 +430,7 @@ public class TestFSPermissionChecker {
     PermissionStatus permStatus = PermissionStatus.createImmutable(owner, group,
       FsPermission.createImmutable(perm));
     INodeDirectory inodeDirectory = new INodeDirectory(
-      INodeId.GRANDFATHER_INODE_ID, name.getBytes("UTF-8"), permStatus, 0L);
+      HdfsConstants.GRANDFATHER_INODE_ID, name.getBytes("UTF-8"), permStatus, 0L);
     parent.addChild(inodeDirectory);
     return inodeDirectory;
   }
@@ -430,9 +439,9 @@ public class TestFSPermissionChecker {
       String owner, String group, short perm) throws IOException {
     PermissionStatus permStatus = PermissionStatus.createImmutable(owner, group,
       FsPermission.createImmutable(perm));
-    INodeFile inodeFile = new INodeFile(INodeId.GRANDFATHER_INODE_ID,
+    INodeFile inodeFile = new INodeFile(HdfsConstants.GRANDFATHER_INODE_ID,
       name.getBytes("UTF-8"), permStatus, 0L, 0L, null, REPLICATION,
-      PREFERRED_BLOCK_SIZE, (byte)0);
+      PREFERRED_BLOCK_SIZE);
     parent.addChild(inodeFile);
     return inodeFile;
   }

@@ -37,6 +37,11 @@ if "%1" == "--config" (
   shift
 )
 
+if "%1" == "--loglevel" (
+  shift
+  shift
+)
+
 :main
   if exist %MAPRED_CONF_DIR%\mapred-env.cmd (
     call %MAPRED_CONF_DIR%\mapred-env.cmd
@@ -90,6 +95,14 @@ if "%1" == "--config" (
   @rem add modules to CLASSPATH
   set CLASSPATH=%CLASSPATH%;%HADOOP_MAPRED_HOME%\modules\*
 
+  if %mapred-command% == classpath (
+    if not defined mapred-command-arguments (
+      @rem No need to bother starting up a JVM for this simple case.
+      @echo %CLASSPATH%
+      exit /b
+    )
+  )
+
   call :%mapred-command% %mapred-command-arguments%
   set java_arguments=%JAVA_HEAP_MAX% %HADOOP_OPTS% -classpath %CLASSPATH% %CLASS% %mapred-command-arguments%
   call %JAVA% %java_arguments%
@@ -98,7 +111,7 @@ goto :eof
 
 
 :classpath
-  @echo %CLASSPATH%
+  set CLASS=org.apache.hadoop.util.Classpath
   goto :eof
 
 :job
@@ -162,6 +175,10 @@ goto :eof
     shift
     shift
   )
+  if "%1" == "--loglevel" (
+    shift
+    shift
+  )
   shift
   set _mapredarguments=
   :MakeCmdArgsLoop 
@@ -184,7 +201,7 @@ goto :eof
   goto print_usage
 
 :print_usage
-  @echo Usage: mapred [--config confdir] COMMAND
+  @echo Usage: mapred [--config confdir] [--loglevel loglevel] COMMAND
   @echo        where COMMAND is one of:
   @echo   job                  manipulate MapReduce jobs
   @echo   queue                get information regarding JobQueues

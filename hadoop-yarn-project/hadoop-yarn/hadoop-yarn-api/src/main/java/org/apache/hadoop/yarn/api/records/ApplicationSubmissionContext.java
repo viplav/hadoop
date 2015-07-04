@@ -18,45 +18,49 @@
 
 package org.apache.hadoop.yarn.api.records;
 
+import java.util.Set;
+
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
+import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
+import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.Records;
 
-import java.util.Set;
-
 /**
- * <p><code>ApplicationSubmissionContext</code> represents all of the
- * information needed by the <code>ResourceManager</code> to launch 
- * the <code>ApplicationMaster</code> for an application.</p>
- * 
- * <p>It includes details such as:
- *   <ul>
- *     <li>{@link ApplicationId} of the application.</li>
- *     <li>Application user.</li>
- *     <li>Application name.</li>
- *     <li>{@link Priority} of the application.</li>
- *     <li>
- *       {@link ContainerLaunchContext} of the container in which the 
- *       <code>ApplicationMaster</code> is executed.
- *     </li>
- *     <li>maxAppAttempts. The maximum number of application attempts.
+ * {@code ApplicationSubmissionContext} represents all of the
+ * information needed by the {@code ResourceManager} to launch
+ * the {@code ApplicationMaster} for an application.
+ * <p>
+ * It includes details such as:
+ * <ul>
+ *   <li>{@link ApplicationId} of the application.</li>
+ *   <li>Application user.</li>
+ *   <li>Application name.</li>
+ *   <li>{@link Priority} of the application.</li>
+ *   <li>
+ *     {@link ContainerLaunchContext} of the container in which the
+ *     <code>ApplicationMaster</code> is executed.
+ *   </li>
+ *   <li>
+ *     maxAppAttempts. The maximum number of application attempts.
  *     It should be no larger than the global number of max attempts in the
- *     Yarn configuration.</li>
- *     <li>attemptFailuresValidityInterval. The default value is -1.
- *     when attemptFailuresValidityInterval in milliseconds is set to > 0,
- *     the failure number will no take failures which happen out of the
- *     validityInterval into failure count. If failure count reaches to
- *     maxAppAttempts, the application will be failed.
- *     </li>
+ *     Yarn configuration.
+ *   </li>
+ *   <li>
+ *     attemptFailuresValidityInterval. The default value is -1.
+ *     when attemptFailuresValidityInterval in milliseconds is set to
+ *     {@literal >} 0, the failure number will no take failures which happen
+ *     out of the validityInterval into failure count. If failure count
+ *     reaches to maxAppAttempts, the application will be failed.
+ *   </li>
  *   <li>Optional, application-specific {@link LogAggregationContext}</li>
- *   </ul>
- * </p>
+ * </ul>
  * 
  * @see ContainerLaunchContext
  * @see ApplicationClientProtocol#submitApplication(org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest)
@@ -72,7 +76,8 @@ public abstract class ApplicationSubmissionContext {
       Priority priority, ContainerLaunchContext amContainer,
       boolean isUnmanagedAM, boolean cancelTokensWhenComplete,
       int maxAppAttempts, Resource resource, String applicationType,
-      boolean keepContainers) {
+      boolean keepContainers, String appLabelExpression,
+      String amContainerLabelExpression) {
     ApplicationSubmissionContext context =
         Records.newRecord(ApplicationSubmissionContext.class);
     context.setApplicationId(applicationId);
@@ -83,10 +88,30 @@ public abstract class ApplicationSubmissionContext {
     context.setUnmanagedAM(isUnmanagedAM);
     context.setCancelTokensWhenComplete(cancelTokensWhenComplete);
     context.setMaxAppAttempts(maxAppAttempts);
-    context.setResource(resource);
     context.setApplicationType(applicationType);
     context.setKeepContainersAcrossApplicationAttempts(keepContainers);
+    context.setNodeLabelExpression(appLabelExpression);
+    context.setResource(resource);
+    
+    ResourceRequest amReq = Records.newRecord(ResourceRequest.class);
+    amReq.setResourceName(ResourceRequest.ANY);
+    amReq.setCapability(resource);
+    amReq.setNumContainers(1);
+    amReq.setRelaxLocality(true);
+    amReq.setNodeLabelExpression(amContainerLabelExpression);
+    context.setAMContainerResourceRequest(amReq);
     return context;
+  }
+  
+  public static ApplicationSubmissionContext newInstance(
+      ApplicationId applicationId, String applicationName, String queue,
+      Priority priority, ContainerLaunchContext amContainer,
+      boolean isUnmanagedAM, boolean cancelTokensWhenComplete,
+      int maxAppAttempts, Resource resource, String applicationType,
+      boolean keepContainers) {
+    return newInstance(applicationId, applicationName, queue, priority,
+        amContainer, isUnmanagedAM, cancelTokensWhenComplete, maxAppAttempts,
+        resource, applicationType, keepContainers, null, null);
   }
 
   @Public
@@ -98,7 +123,7 @@ public abstract class ApplicationSubmissionContext {
       int maxAppAttempts, Resource resource, String applicationType) {
     return newInstance(applicationId, applicationName, queue, priority,
       amContainer, isUnmanagedAM, cancelTokensWhenComplete, maxAppAttempts,
-      resource, applicationType, false);
+      resource, applicationType, false, null, null);
   }
 
   @Public
@@ -111,6 +136,30 @@ public abstract class ApplicationSubmissionContext {
     return newInstance(applicationId, applicationName, queue, priority,
       amContainer, isUnmanagedAM, cancelTokensWhenComplete, maxAppAttempts,
       resource, null);
+  }
+  
+  @Public
+  @Stable
+  public static ApplicationSubmissionContext newInstance(
+      ApplicationId applicationId, String applicationName, String queue,
+      ContainerLaunchContext amContainer, boolean isUnmanagedAM,
+      boolean cancelTokensWhenComplete, int maxAppAttempts,
+      String applicationType, boolean keepContainers,
+      String appLabelExpression, ResourceRequest resourceRequest) {
+    ApplicationSubmissionContext context =
+        Records.newRecord(ApplicationSubmissionContext.class);
+    context.setApplicationId(applicationId);
+    context.setApplicationName(applicationName);
+    context.setQueue(queue);
+    context.setAMContainerSpec(amContainer);
+    context.setUnmanagedAM(isUnmanagedAM);
+    context.setCancelTokensWhenComplete(cancelTokensWhenComplete);
+    context.setMaxAppAttempts(maxAppAttempts);
+    context.setApplicationType(applicationType);
+    context.setKeepContainersAcrossApplicationAttempts(keepContainers);
+    context.setNodeLabelExpression(appLabelExpression);
+    context.setAMContainerResourceRequest(resourceRequest);
+    return context;
   }
 
   @Public
@@ -290,13 +339,13 @@ public abstract class ApplicationSubmissionContext {
 
   /**
    * Get the resource required by the <code>ApplicationMaster</code> for this
-   * application.
+   * application. Please note this will be DEPRECATED, use <em>getResource</em>
+   * in <em>getAMContainerResourceRequest</em> instead.
    * 
    * @return the resource required by the <code>ApplicationMaster</code> for
    *         this application.
    */
   @Public
-  @Stable
   public abstract Resource getResource();
 
   /**
@@ -307,7 +356,6 @@ public abstract class ApplicationSubmissionContext {
    * for this application.
    */
   @Public
-  @Stable
   public abstract void setResource(Resource resource);
   
   /**
@@ -379,6 +427,54 @@ public abstract class ApplicationSubmissionContext {
   @Public
   @Stable
   public abstract void setApplicationTags(Set<String> tags);
+  
+  /**
+   * Get node-label-expression for this app. If this is set, all containers of
+   * this application without setting node-label-expression in ResurceRequest
+   * will get allocated resources on only those nodes that satisfy this
+   * node-label-expression.
+   * 
+   * If different node-label-expression of this app and ResourceRequest are set
+   * at the same time, the one set in ResourceRequest will be used when
+   * allocating container
+   * 
+   * @return node-label-expression for this app
+   */
+  @Public
+  @Evolving
+  public abstract String getNodeLabelExpression();
+  
+  /**
+   * Set node-label-expression for this app
+   * @param nodeLabelExpression node-label-expression of this app
+   */
+  @Public
+  @Evolving
+  public abstract void setNodeLabelExpression(String nodeLabelExpression);
+  
+  /**
+   * Get ResourceRequest of AM container, if this is not null, scheduler will
+   * use this to acquire resource for AM container.
+   * 
+   * If this is null, scheduler will assemble a ResourceRequest by using
+   * <em>getResource</em> and <em>getPriority</em> of
+   * <em>ApplicationSubmissionContext</em>.
+   * 
+   * Number of containers and Priority will be ignore.
+   * 
+   * @return ResourceRequest of AM container
+   */
+  @Public
+  @Evolving
+  public abstract ResourceRequest getAMContainerResourceRequest();
+  
+  /**
+   * Set ResourceRequest of AM container
+   * @param request of AM container
+   */
+  @Public
+  @Evolving
+  public abstract void setAMContainerResourceRequest(ResourceRequest request);
 
   /**
    * Get the attemptFailuresValidityInterval in milliseconds for the application
@@ -417,4 +513,26 @@ public abstract class ApplicationSubmissionContext {
   @Stable
   public abstract void setLogAggregationContext(
       LogAggregationContext logAggregationContext);
+
+  /**
+   * Get the reservation id, that corresponds to a valid resource allocation in
+   * the scheduler (between start and end time of the corresponding reservation)
+   * 
+   * @return the reservation id representing the unique id of the corresponding
+   *         reserved resource allocation in the scheduler
+   */
+  @Public
+  @Unstable
+  public abstract ReservationId getReservationID();
+
+  /**
+   * Set the reservation id, that correspond to a valid resource allocation in
+   * the scheduler (between start and end time of the corresponding reservation)
+   * 
+   * @param reservationID representing the unique id of the
+   *          corresponding reserved resource allocation in the scheduler
+   */
+  @Public
+  @Unstable
+  public abstract void setReservationID(ReservationId reservationID);
 }

@@ -142,7 +142,7 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs,
 {
     char tmp[4096];
     hdfsFile file;
-    int ret, expected;
+    int ret, expected, numEntries;
     hdfsFileInfo *fileInfo;
     struct hdfsReadStatistics *readStats = NULL;
 
@@ -152,6 +152,14 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs,
     EXPECT_ZERO(hdfsCreateDirectory(fs, paths->prefix));
 
     EXPECT_ZERO(doTestGetDefaultBlockSize(fs, paths->prefix));
+
+    /* There should be no entry in the directory. */
+    errno = EACCES; // see if errno is set to 0 on success
+    EXPECT_NULL_WITH_ERRNO(hdfsListDirectory(fs, paths->prefix, &numEntries), 0);
+    if (numEntries != 0) {
+        fprintf(stderr, "hdfsListDirectory set numEntries to "
+                "%d on empty directory.", numEntries);
+    }
 
     /* There should not be any file to open for reading. */
     EXPECT_NULL(hdfsOpenFile(fs, paths->file1, O_RDONLY, 0, 0, 0));
@@ -179,6 +187,13 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs,
     EXPECT_ZERO(hdfsHSync(fs, file));
     EXPECT_ZERO(hdfsCloseFile(fs, file));
 
+    /* There should be 1 entry in the directory. */
+    EXPECT_NONNULL(hdfsListDirectory(fs, paths->prefix, &numEntries));
+    if (numEntries != 1) {
+        fprintf(stderr, "hdfsListDirectory set numEntries to "
+                "%d on directory containing 1 file.", numEntries);
+    }
+
     /* Let's re-open the file for reading */
     file = hdfsOpenFile(fs, paths->file1, O_RDONLY, 0, 0, 0);
     EXPECT_NONNULL(file);
@@ -204,6 +219,10 @@ static int doTestHdfsOperations(struct tlhThreadInfo *ti, hdfsFS fs,
     EXPECT_ZERO(hdfsFileGetReadStatistics(file, &readStats));
     errno = 0;
     EXPECT_UINT64_EQ((uint64_t)expected, readStats->totalBytesRead);
+    hdfsFileFreeReadStatistics(readStats);
+    EXPECT_ZERO(hdfsFileClearReadStatistics(file));
+    EXPECT_ZERO(hdfsFileGetReadStatistics(file, &readStats));
+    EXPECT_UINT64_EQ((uint64_t)0, readStats->totalBytesRead);
     hdfsFileFreeReadStatistics(readStats);
     EXPECT_ZERO(memcmp(paths->prefix, tmp, expected));
     EXPECT_ZERO(hdfsCloseFile(fs, file));

@@ -19,6 +19,7 @@
 package org.apache.hadoop.crypto;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * Defines properties of a CipherSuite. Modeled after the ciphers in
@@ -73,16 +74,6 @@ public enum CipherSuite {
     return builder.toString();
   }
   
-  public static void checkName(String name) {
-    CipherSuite[] suites = CipherSuite.values();
-    for (CipherSuite suite : suites) {
-      if (suite.getName().equals(name)) {
-        return;
-      }
-    }
-    throw new IllegalArgumentException("Invalid cipher suite name: " + name);
-  }
-  
   /**
    * Convert to CipherSuite from name, {@link #algoBlockSize} is fixed for
    * certain cipher suite, just need to compare the name.
@@ -107,7 +98,7 @@ public enum CipherSuite {
     String[] parts = name.split("/");
     StringBuilder suffix = new StringBuilder();
     for (String part : parts) {
-      suffix.append(".").append(part.toLowerCase());
+      suffix.append(".").append(StringUtils.toLowerCase(part));
     }
     
     return suffix.toString();

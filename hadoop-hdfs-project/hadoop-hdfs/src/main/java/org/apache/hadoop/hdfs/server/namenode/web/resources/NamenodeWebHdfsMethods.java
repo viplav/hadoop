@@ -53,11 +53,12 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Options;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
@@ -69,50 +70,14 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.JspHelper;
+import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.web.JsonUtil;
 import org.apache.hadoop.hdfs.web.ParamFilter;
-import org.apache.hadoop.hdfs.web.SWebHdfsFileSystem;
+import org.apache.hadoop.hdfs.web.WebHdfsConstants;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
-import org.apache.hadoop.hdfs.web.resources.AccessTimeParam;
-import org.apache.hadoop.hdfs.web.resources.AclPermissionParam;
-import org.apache.hadoop.hdfs.web.resources.BlockSizeParam;
-import org.apache.hadoop.hdfs.web.resources.BufferSizeParam;
-import org.apache.hadoop.hdfs.web.resources.ConcatSourcesParam;
-import org.apache.hadoop.hdfs.web.resources.CreateParentParam;
-import org.apache.hadoop.hdfs.web.resources.DelegationParam;
-import org.apache.hadoop.hdfs.web.resources.DeleteOpParam;
-import org.apache.hadoop.hdfs.web.resources.DestinationParam;
-import org.apache.hadoop.hdfs.web.resources.DoAsParam;
-import org.apache.hadoop.hdfs.web.resources.ExcludeDatanodesParam;
-import org.apache.hadoop.hdfs.web.resources.GetOpParam;
-import org.apache.hadoop.hdfs.web.resources.GroupParam;
-import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
-import org.apache.hadoop.hdfs.web.resources.LengthParam;
-import org.apache.hadoop.hdfs.web.resources.ModificationTimeParam;
-import org.apache.hadoop.hdfs.web.resources.NamenodeAddressParam;
-import org.apache.hadoop.hdfs.web.resources.OffsetParam;
-import org.apache.hadoop.hdfs.web.resources.OldSnapshotNameParam;
-import org.apache.hadoop.hdfs.web.resources.OverwriteParam;
-import org.apache.hadoop.hdfs.web.resources.OwnerParam;
-import org.apache.hadoop.hdfs.web.resources.Param;
-import org.apache.hadoop.hdfs.web.resources.PermissionParam;
-import org.apache.hadoop.hdfs.web.resources.PostOpParam;
-import org.apache.hadoop.hdfs.web.resources.PutOpParam;
-import org.apache.hadoop.hdfs.web.resources.RecursiveParam;
-import org.apache.hadoop.hdfs.web.resources.RenameOptionSetParam;
-import org.apache.hadoop.hdfs.web.resources.RenewerParam;
-import org.apache.hadoop.hdfs.web.resources.ReplicationParam;
-import org.apache.hadoop.hdfs.web.resources.SnapshotNameParam;
-import org.apache.hadoop.hdfs.web.resources.TokenArgumentParam;
-import org.apache.hadoop.hdfs.web.resources.UriFsPathParam;
-import org.apache.hadoop.hdfs.web.resources.UserParam;
-import org.apache.hadoop.hdfs.web.resources.XAttrEncodingParam;
-import org.apache.hadoop.hdfs.web.resources.XAttrNameParam;
-import org.apache.hadoop.hdfs.web.resources.XAttrSetFlagParam;
-import org.apache.hadoop.hdfs.web.resources.XAttrValueParam;
-import org.apache.hadoop.hdfs.web.resources.FsActionParam;
+import org.apache.hadoop.hdfs.web.resources.*;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.ipc.RetriableException;
 import org.apache.hadoop.ipc.Server;
@@ -201,7 +166,11 @@ public class NamenodeWebHdfsMethods {
   static DatanodeInfo chooseDatanode(final NameNode namenode,
       final String path, final HttpOpParam.Op op, final long openOffset,
       final long blocksize, final String excludeDatanodes) throws IOException {
-    final BlockManager bm = namenode.getNamesystem().getBlockManager();
+    FSNamesystem fsn = namenode.getNamesystem();
+    if (fsn == null) {
+      throw new IOException("Namesystem has not been intialized yet.");
+    }
+    final BlockManager bm = fsn.getBlockManager();
     
     HashSet<Node> excludes = new HashSet<Node>();
     if (excludeDatanodes != null) {
@@ -283,8 +252,8 @@ public class NamenodeWebHdfsMethods {
       return null;
     }
     final Token<? extends TokenIdentifier> t = c.getAllTokens().iterator().next();
-    Text kind = request.getScheme().equals("http") ? WebHdfsFileSystem.TOKEN_KIND
-        : SWebHdfsFileSystem.TOKEN_KIND;
+    Text kind = request.getScheme().equals("http") ? WebHdfsConstants.WEBHDFS_TOKEN_KIND
+        : WebHdfsConstants.SWEBHDFS_TOKEN_KIND;
     t.setKind(kind);
     return t;
   }
@@ -651,10 +620,12 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
           final BufferSizeParam bufferSize,
       @QueryParam(ExcludeDatanodesParam.NAME) @DefaultValue(ExcludeDatanodesParam.DEFAULT)
-          final ExcludeDatanodesParam excludeDatanodes
+          final ExcludeDatanodesParam excludeDatanodes,
+      @QueryParam(NewLengthParam.NAME) @DefaultValue(NewLengthParam.DEFAULT)
+          final NewLengthParam newLength
       ) throws IOException, InterruptedException {
     return post(ugi, delegation, username, doAsUser, ROOT, op, concatSrcs,
-        bufferSize, excludeDatanodes);
+        bufferSize, excludeDatanodes, newLength);
   }
 
   /** Handle HTTP POST request. */
@@ -678,11 +649,13 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(BufferSizeParam.NAME) @DefaultValue(BufferSizeParam.DEFAULT)
           final BufferSizeParam bufferSize,
       @QueryParam(ExcludeDatanodesParam.NAME) @DefaultValue(ExcludeDatanodesParam.DEFAULT)
-          final ExcludeDatanodesParam excludeDatanodes
+          final ExcludeDatanodesParam excludeDatanodes,
+      @QueryParam(NewLengthParam.NAME) @DefaultValue(NewLengthParam.DEFAULT)
+          final NewLengthParam newLength
       ) throws IOException, InterruptedException {
 
     init(ugi, delegation, username, doAsUser, path, op, concatSrcs, bufferSize,
-        excludeDatanodes);
+        excludeDatanodes, newLength);
 
     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
       @Override
@@ -690,7 +663,7 @@ public class NamenodeWebHdfsMethods {
         try {
           return post(ugi, delegation, username, doAsUser,
               path.getAbsolutePath(), op, concatSrcs, bufferSize,
-              excludeDatanodes);
+              excludeDatanodes, newLength);
         } finally {
           reset();
         }
@@ -707,9 +680,11 @@ public class NamenodeWebHdfsMethods {
       final PostOpParam op,
       final ConcatSourcesParam concatSrcs,
       final BufferSizeParam bufferSize,
-      final ExcludeDatanodesParam excludeDatanodes
+      final ExcludeDatanodesParam excludeDatanodes,
+      final NewLengthParam newLength
       ) throws IOException, URISyntaxException {
     final NameNode namenode = (NameNode)context.getAttribute("name.node");
+    final NamenodeProtocols np = getRPCServer(namenode);
 
     switch(op.getValue()) {
     case APPEND:
@@ -721,8 +696,16 @@ public class NamenodeWebHdfsMethods {
     }
     case CONCAT:
     {
-      getRPCServer(namenode).concat(fullpath, concatSrcs.getAbsolutePaths());
+      np.concat(fullpath, concatSrcs.getAbsolutePaths());
       return Response.ok().build();
+    }
+    case TRUNCATE:
+    {
+      // We treat each rest request as a separate client.
+      final boolean b = np.truncate(fullpath, newLength.getValue(), 
+          "DFSClient_" + DFSUtil.getSecureRandom().nextLong());
+      final String js = JsonUtil.toJsonString("boolean", b);
+      return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
     }
     default:
       throw new UnsupportedOperationException(op + " is not supported");
@@ -758,10 +741,15 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(ExcludeDatanodesParam.NAME) @DefaultValue(ExcludeDatanodesParam.DEFAULT)
           final ExcludeDatanodesParam excludeDatanodes,
       @QueryParam(FsActionParam.NAME) @DefaultValue(FsActionParam.DEFAULT)
-          final FsActionParam fsAction
+          final FsActionParam fsAction,
+      @QueryParam(TokenKindParam.NAME) @DefaultValue(TokenKindParam.DEFAULT)
+          final TokenKindParam tokenKind,
+      @QueryParam(TokenServiceParam.NAME) @DefaultValue(TokenServiceParam.DEFAULT)
+          final TokenServiceParam tokenService
       ) throws IOException, InterruptedException {
     return get(ugi, delegation, username, doAsUser, ROOT, op, offset, length,
-        renewer, bufferSize, xattrNames, xattrEncoding, excludeDatanodes, fsAction);
+        renewer, bufferSize, xattrNames, xattrEncoding, excludeDatanodes, fsAction,
+        tokenKind, tokenService);
   }
 
   /** Handle HTTP GET request. */
@@ -794,11 +782,16 @@ public class NamenodeWebHdfsMethods {
       @QueryParam(ExcludeDatanodesParam.NAME) @DefaultValue(ExcludeDatanodesParam.DEFAULT)
           final ExcludeDatanodesParam excludeDatanodes,
       @QueryParam(FsActionParam.NAME) @DefaultValue(FsActionParam.DEFAULT)
-          final FsActionParam fsAction
+          final FsActionParam fsAction,
+      @QueryParam(TokenKindParam.NAME) @DefaultValue(TokenKindParam.DEFAULT)
+          final TokenKindParam tokenKind,
+      @QueryParam(TokenServiceParam.NAME) @DefaultValue(TokenServiceParam.DEFAULT)
+          final TokenServiceParam tokenService
       ) throws IOException, InterruptedException {
 
     init(ugi, delegation, username, doAsUser, path, op, offset, length,
-        renewer, bufferSize, xattrEncoding, excludeDatanodes, fsAction);
+        renewer, bufferSize, xattrEncoding, excludeDatanodes, fsAction,
+        tokenKind, tokenService);
 
     return ugi.doAs(new PrivilegedExceptionAction<Response>() {
       @Override
@@ -806,7 +799,8 @@ public class NamenodeWebHdfsMethods {
         try {
           return get(ugi, delegation, username, doAsUser,
               path.getAbsolutePath(), op, offset, length, renewer, bufferSize,
-              xattrNames, xattrEncoding, excludeDatanodes, fsAction);
+              xattrNames, xattrEncoding, excludeDatanodes, fsAction, tokenKind,
+              tokenService);
         } finally {
           reset();
         }
@@ -828,9 +822,13 @@ public class NamenodeWebHdfsMethods {
       final List<XAttrNameParam> xattrNames,
       final XAttrEncodingParam xattrEncoding,
       final ExcludeDatanodesParam excludeDatanodes,
-      final FsActionParam fsAction
+      final FsActionParam fsAction,
+      final TokenKindParam tokenKind,
+      final TokenServiceParam tokenService
       ) throws IOException, URISyntaxException {
     final NameNode namenode = (NameNode)context.getAttribute("name.node");
+    final Configuration conf = (Configuration) context
+        .getAttribute(JspHelper.CURRENT_CONF);
     final NamenodeProtocols np = getRPCServer(namenode);
 
     switch(op.getValue()) {
@@ -885,14 +883,22 @@ public class NamenodeWebHdfsMethods {
       }
       final Token<? extends TokenIdentifier> token = generateDelegationToken(
           namenode, ugi, renewer.getValue());
+
+      final String setServiceName = tokenService.getValue();
+      final String setKind = tokenKind.getValue();
+      if (setServiceName != null) {
+        token.setService(new Text(setServiceName));
+      }
+      if (setKind != null) {
+        token.setKind(new Text(setKind));
+      }
       final String js = JsonUtil.toJsonString(token);
       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
     }
-    case GETHOMEDIRECTORY:
-    {
-      final String js = JsonUtil.toJsonString(
-          org.apache.hadoop.fs.Path.class.getSimpleName(),
-          WebHdfsFileSystem.getHomeDirectoryString(ugi));
+    case GETHOMEDIRECTORY: {
+      final String js = JsonUtil.toJsonString("Path",
+          FileSystem.get(conf != null ? conf : new Configuration())
+              .getHomeDirectory().toUri().getPath());
       return Response.ok(js).type(MediaType.APPLICATION_JSON).build();
     }
     case GETACLSTATUS: {

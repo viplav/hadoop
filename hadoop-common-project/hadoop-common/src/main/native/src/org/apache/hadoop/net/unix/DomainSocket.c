@@ -112,9 +112,9 @@ static jthrowable newSocketException(JNIEnv *env, int errnum,
  * to the heap if necessary.
  */
 struct flexibleBuffer {
-  int8_t *curBuf;
-  int8_t *allocBuf;
-  int8_t stackBuf[8196];
+  jbyte *curBuf;
+  jbyte *allocBuf;
+  jbyte stackBuf[8196];
 };
 
 static jthrowable flexBufInit(JNIEnv *env, struct flexibleBuffer *flexBuf, jint length)
@@ -153,7 +153,7 @@ static jthrowable setup(JNIEnv *env, int *ofd, jobject jpath, int doConnect)
         terror(ret));
     goto done;
   }
-  memset(&addr, 0, sizeof(&addr));
+  memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
   cpath = (*env)->GetStringUTFChars(env, jpath, NULL);
   if (!cpath) {
@@ -637,7 +637,7 @@ JNIEnv *env, jclass clazz, jint fd)
  * @return               NULL on success; or the unraised exception representing
  *                       the problem.
  */
-static jthrowable write_fully(JNIEnv *env, int fd, int8_t *buf, int amt)
+static jthrowable write_fully(JNIEnv *env, int fd, jbyte *buf, int amt)
 {
   int err, res;
 

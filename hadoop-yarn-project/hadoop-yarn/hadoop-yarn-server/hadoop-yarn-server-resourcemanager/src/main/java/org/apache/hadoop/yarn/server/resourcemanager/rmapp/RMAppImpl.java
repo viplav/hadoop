@@ -18,24 +18,34 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.rmapp;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.DataInputByteBuffer;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
@@ -44,9 +54,12 @@ import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
+import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
+import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
@@ -55,14 +68,15 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.security.client.ClientToAMTokenIdentifier;
+import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
 import org.apache.hadoop.yarn.server.resourcemanager.ApplicationMasterService;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAppManagerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAppManagerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.ApplicationState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.Recoverable;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppNodeUpdateEvent.RMAppNodeUpdateType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AggregateAppResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
@@ -128,12 +142,27 @@ public class RMAppImpl implements RMApp, Recoverable {
   private long startTime;
   private long finishTime = 0;
   private long storedFinishTime = 0;
-  private RMAppAttempt currentAttempt;
+  // This field isn't protected by readlock now.
+  private volatile RMAppAttempt currentAttempt;
   private String queue;
   private EventHandler handler;
   private static final AppFinishedTransition FINISHED_TRANSITION =
       new AppFinishedTransition();
   private Set<NodeId> ranNodes = new ConcurrentSkipListSet<NodeId>();
+
+  private final boolean logAggregationEnabled;
+  private long logAggregationStartTime = 0;
+  private final long logAggregationStatusTimeout;
+  private final Map<NodeId, LogAggregationReport> logAggregationStatus =
+      new HashMap<NodeId, LogAggregationReport>();
+  private LogAggregationStatus logAggregationStatusForAppReport;
+  private int logAggregationSucceed = 0;
+  private int logAggregationFailed = 0;
+  private Map<NodeId, List<String>> logAggregationDiagnosticsForNMs =
+      new HashMap<NodeId, List<String>>();
+  private Map<NodeId, List<String>> logAggregationFailureMessagesForNMs =
+      new HashMap<NodeId, List<String>>();
+  private final int maxLogAggregationDiagnosticsInMemory;
 
   // These states stored are only valid when app is at killing or final_saving.
   private RMAppState stateBeforeKilling;
@@ -141,6 +170,7 @@ public class RMAppImpl implements RMApp, Recoverable {
   private RMAppEvent eventCausingFinalSaving;
   private RMAppState targetedFinalState;
   private RMAppState recoveredFinalState;
+  private ResourceRequest amReq;
 
   Object transitionTodo;
 
@@ -221,6 +251,9 @@ public class RMAppImpl implements RMApp, Recoverable {
         new FinalSavingTransition(FINISHED_TRANSITION, RMAppState.FINISHED))
     .addTransition(RMAppState.ACCEPTED, RMAppState.KILLING,
         RMAppEventType.KILL, new KillAttemptTransition())
+    .addTransition(RMAppState.ACCEPTED, RMAppState.FINAL_SAVING,
+        RMAppEventType.ATTEMPT_KILLED,
+        new FinalSavingTransition(new AppKilledTransition(), RMAppState.KILLED))
     .addTransition(RMAppState.ACCEPTED, RMAppState.ACCEPTED, 
         RMAppEventType.APP_RUNNING_ON_NODE,
         new AppRunningOnNodeTransition())
@@ -285,13 +318,23 @@ public class RMAppImpl implements RMApp, Recoverable {
         RMAppEventType.ATTEMPT_KILLED,
         new FinalSavingTransition(
           new AppKilledTransition(), RMAppState.KILLED))
+    .addTransition(RMAppState.KILLING, RMAppState.FINAL_SAVING,
+        RMAppEventType.ATTEMPT_UNREGISTERED,
+        new FinalSavingTransition(
+          new AttemptUnregisteredTransition(),
+          RMAppState.FINISHING, RMAppState.FINISHED))
+    .addTransition(RMAppState.KILLING, RMAppState.FINISHED,
+      // UnManagedAM directly jumps to finished
+        RMAppEventType.ATTEMPT_FINISHED, FINISHED_TRANSITION)
+    .addTransition(RMAppState.KILLING,
+        EnumSet.of(RMAppState.FINAL_SAVING),
+        RMAppEventType.ATTEMPT_FAILED,
+        new AttemptFailedTransition(RMAppState.KILLING))
+
     .addTransition(RMAppState.KILLING, RMAppState.KILLING,
         EnumSet.of(
             RMAppEventType.NODE_UPDATE,
             RMAppEventType.ATTEMPT_REGISTERED,
-            RMAppEventType.ATTEMPT_UNREGISTERED,
-            RMAppEventType.ATTEMPT_FINISHED,
-            RMAppEventType.ATTEMPT_FAILED,
             RMAppEventType.APP_UPDATE_SAVED,
             RMAppEventType.KILL, RMAppEventType.MOVE))
 
@@ -340,7 +383,8 @@ public class RMAppImpl implements RMApp, Recoverable {
       Configuration config, String name, String user, String queue,
       ApplicationSubmissionContext submissionContext, YarnScheduler scheduler,
       ApplicationMasterService masterService, long submitTime,
-      String applicationType, Set<String> applicationTags) {
+      String applicationType, Set<String> applicationTags, 
+      ResourceRequest amReq) {
 
     this.systemClock = new SystemClock();
 
@@ -359,6 +403,7 @@ public class RMAppImpl implements RMApp, Recoverable {
     this.startTime = this.systemClock.getTime();
     this.applicationType = applicationType;
     this.applicationTags = applicationTags;
+    this.amReq = amReq;
 
     int globalMaxAppAttempts = conf.getInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
         YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
@@ -376,6 +421,11 @@ public class RMAppImpl implements RMApp, Recoverable {
 
     this.attemptFailuresValidityInterval =
         submissionContext.getAttemptFailuresValidityInterval();
+    if (this.attemptFailuresValidityInterval > 0) {
+      LOG.info("The attemptFailuresValidityInterval for the application: "
+          + this.applicationId + " is " + this.attemptFailuresValidityInterval
+          + ".");
+    }
 
     ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
     this.readLock = lock.readLock();
@@ -385,6 +435,27 @@ public class RMAppImpl implements RMApp, Recoverable {
 
     rmContext.getRMApplicationHistoryWriter().applicationStarted(this);
     rmContext.getSystemMetricsPublisher().appCreated(this, startTime);
+
+    long localLogAggregationStatusTimeout =
+        conf.getLong(YarnConfiguration.LOG_AGGREGATION_STATUS_TIME_OUT_MS,
+          YarnConfiguration.DEFAULT_LOG_AGGREGATION_STATUS_TIME_OUT_MS);
+    if (localLogAggregationStatusTimeout <= 0) {
+      this.logAggregationStatusTimeout =
+          YarnConfiguration.DEFAULT_LOG_AGGREGATION_STATUS_TIME_OUT_MS;
+    } else {
+      this.logAggregationStatusTimeout = localLogAggregationStatusTimeout;
+    }
+    this.logAggregationEnabled =
+        conf.getBoolean(YarnConfiguration.LOG_AGGREGATION_ENABLED,
+          YarnConfiguration.DEFAULT_LOG_AGGREGATION_ENABLED);
+    if (this.logAggregationEnabled) {
+      this.logAggregationStatusForAppReport = LogAggregationStatus.NOT_START;
+    } else {
+      this.logAggregationStatusForAppReport = LogAggregationStatus.DISABLED;
+    }
+    maxLogAggregationDiagnosticsInMemory = conf.getInt(
+        YarnConfiguration.RM_MAX_LOG_AGGREGATION_DIAGNOSTICS_IN_MEMORY,
+        YarnConfiguration.DEFAULT_RM_MAX_LOG_AGGREGATION_DIAGNOSTICS_IN_MEMORY);
   }
 
   @Override
@@ -433,16 +504,11 @@ public class RMAppImpl implements RMApp, Recoverable {
 
   @Override
   public float getProgress() {
-    this.readLock.lock();
-
-    try {
-      if (this.currentAttempt != null) {
-        return this.currentAttempt.getProgress();
-      }
-      return 0;
-    } finally {
-      this.readLock.unlock();
+    RMAppAttempt attempt = this.currentAttempt;
+    if (attempt != null) {
+      return attempt.getProgress();
     }
+    return 0;
   }
 
   @Override
@@ -473,13 +539,7 @@ public class RMAppImpl implements RMApp, Recoverable {
 
   @Override
   public RMAppAttempt getCurrentAppAttempt() {
-    this.readLock.lock();
-
-    try {
-      return this.currentAttempt;
-    } finally {
-      this.readLock.unlock();
-    }
+    return this.currentAttempt;
   }
 
   @Override
@@ -538,6 +598,7 @@ public class RMAppImpl implements RMApp, Recoverable {
       String trackingUrl = UNAVAILABLE;
       String host = UNAVAILABLE;
       String origTrackingUrl = UNAVAILABLE;
+      LogAggregationStatus logAggregationStatus = null;
       int rpcPort = -1;
       ApplicationResourceUsageReport appUsageReport =
           RMServerUtils.DUMMY_APPLICATION_RESOURCE_USAGE_REPORT;
@@ -568,6 +629,7 @@ public class RMAppImpl implements RMApp, Recoverable {
           rpcPort = this.currentAttempt.getRpcPort();
           appUsageReport = currentAttempt.getApplicationResourceUsageReport();
           progress = currentAttempt.getProgress();
+          logAggregationStatus = this.getLogAggregationStatusForAppReport();
         }
         diags = this.diagnostics.toString();
 
@@ -595,13 +657,15 @@ public class RMAppImpl implements RMApp, Recoverable {
                 DUMMY_APPLICATION_ATTEMPT_NUMBER);
       }
 
-      return BuilderUtils.newApplicationReport(this.applicationId,
-          currentApplicationAttemptId, this.user, this.queue,
-          this.name, host, rpcPort, clientToAMToken,
+      ApplicationReport report = BuilderUtils.newApplicationReport(
+          this.applicationId, currentApplicationAttemptId, this.user,
+          this.queue, this.name, host, rpcPort, clientToAMToken,
           createApplicationState(), diags,
           trackingUrl, this.startTime, this.finishTime, finishState,
           appUsageReport, origTrackingUrl, progress, this.applicationType, 
           amrmToken, applicationTags);
+      report.setLogAggregationStatus(logAggregationStatus);
+      return report;
     } finally {
       this.readLock.unlock();
     }
@@ -650,30 +714,20 @@ public class RMAppImpl implements RMApp, Recoverable {
 
   @Override
   public String getTrackingUrl() {
-    this.readLock.lock();
-    
-    try {
-      if (this.currentAttempt != null) {
-        return this.currentAttempt.getTrackingUrl();
-      }
-      return null;
-    } finally {
-      this.readLock.unlock();
+    RMAppAttempt attempt = this.currentAttempt;
+    if (attempt != null) {
+      return attempt.getTrackingUrl();
     }
+    return null;
   }
 
   @Override
   public String getOriginalTrackingUrl() {
-    this.readLock.lock();
-    
-    try {
-      if (this.currentAttempt != null) {
-        return this.currentAttempt.getOriginalTrackingUrl();
-      }
-      return null;
-    } finally {
-      this.readLock.unlock();
+    RMAppAttempt attempt = this.currentAttempt;
+    if (attempt != null) {
+      return attempt.getOriginalTrackingUrl();
     }
+    return null;
   }
 
   @Override
@@ -720,11 +774,13 @@ public class RMAppImpl implements RMApp, Recoverable {
   }
 
   @Override
-  public void recover(RMState state) throws Exception{
-    ApplicationState appState = state.getApplicationState().get(getApplicationId());
+  public void recover(RMState state) {
+    ApplicationStateData appState =
+        state.getApplicationState().get(getApplicationId());
     this.recoveredFinalState = appState.getState();
     LOG.info("Recovering app: " + getApplicationId() + " with " + 
-        + appState.getAttemptCount() + " attempts and final state = " + this.recoveredFinalState );
+        + appState.getAttemptCount() + " attempts and final state = "
+        + this.recoveredFinalState );
     this.diagnostics.append(appState.getDiagnostics());
     this.storedFinishTime = appState.getFinishTime();
     this.startTime = appState.getStartTime();
@@ -746,7 +802,7 @@ public class RMAppImpl implements RMApp, Recoverable {
           // previously failed attempts(which should not include Preempted,
           // hardware error and NM resync) + 1) equal to the max-attempt
           // limit.
-          maxAppAttempts == (getNumFailedAppAttempts() + 1));
+          maxAppAttempts == (getNumFailedAppAttempts() + 1), amReq);
     attempts.put(appAttemptId, attempt);
     currentAttempt = attempt;
   }
@@ -794,6 +850,13 @@ public class RMAppImpl implements RMApp, Recoverable {
       
       // otherwise, add it to ranNodes for further process
       app.ranNodes.add(nodeAddedEvent.getNodeId());
+
+      if (!app.logAggregationStatus.containsKey(nodeAddedEvent.getNodeId())) {
+        app.logAggregationStatus.put(nodeAddedEvent.getNodeId(),
+          LogAggregationReport.newInstance(app.applicationId,
+            app.logAggregationEnabled ? LogAggregationStatus.NOT_START
+                : LogAggregationStatus.DISABLED, ""));
+      }
     };
   }
 
@@ -835,6 +898,8 @@ public class RMAppImpl implements RMApp, Recoverable {
     @Override
     public RMAppState transition(RMAppImpl app, RMAppEvent event) {
 
+      RMAppRecoverEvent recoverEvent = (RMAppRecoverEvent) event;
+      app.recover(recoverEvent.getRMState());
       // The app has completed.
       if (app.recoveredFinalState != null) {
         app.recoverAppAttempts();
@@ -842,18 +907,34 @@ public class RMAppImpl implements RMApp, Recoverable {
         return app.recoveredFinalState;
       }
 
+      if (UserGroupInformation.isSecurityEnabled()) {
+        // synchronously renew delegation token on recovery.
+        try {
+          app.rmContext.getDelegationTokenRenewer().addApplicationSync(
+            app.getApplicationId(), app.parseCredentials(),
+            app.submissionContext.getCancelTokensWhenComplete(), app.getUser());
+        } catch (Exception e) {
+          String msg = "Failed to renew token for " + app.applicationId
+                  + " on recovery : " + e.getMessage();
+          app.diagnostics.append(msg);
+          LOG.error(msg, e);
+        }
+      }
+
       // No existent attempts means the attempt associated with this app was not
       // started or started but not yet saved.
       if (app.attempts.isEmpty()) {
         app.scheduler.handle(new AppAddedSchedulerEvent(app.applicationId,
-          app.submissionContext.getQueue(), app.user));
+          app.submissionContext.getQueue(), app.user,
+          app.submissionContext.getReservationID()));
         return RMAppState.SUBMITTED;
       }
 
       // Add application to scheduler synchronously to guarantee scheduler
       // knows applications before AM or NM re-registers.
       app.scheduler.handle(new AppAddedSchedulerEvent(app.applicationId,
-        app.submissionContext.getQueue(), app.user, true));
+        app.submissionContext.getQueue(), app.user, true,
+          app.submissionContext.getReservationID()));
 
       // recover attempts
       app.recoverAppAttempts();
@@ -880,7 +961,8 @@ public class RMAppImpl implements RMApp, Recoverable {
     @Override
     public void transition(RMAppImpl app, RMAppEvent event) {
       app.handler.handle(new AppAddedSchedulerEvent(app.applicationId,
-        app.submissionContext.getQueue(), app.user));
+        app.submissionContext.getQueue(), app.user,
+        app.submissionContext.getReservationID()));
     }
   }
 
@@ -932,9 +1014,19 @@ public class RMAppImpl implements RMApp, Recoverable {
               + " failed due to " + failedEvent.getDiagnostics()
               + ". Failing the application.";
     } else if (this.isNumAttemptsBeyondThreshold) {
-      msg = "Application " + this.getApplicationId() + " failed "
-              + this.maxAppAttempts + " times due to "
-              + failedEvent.getDiagnostics() + ". Failing the application.";
+      int globalLimit = conf.getInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS,
+          YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS);
+      msg = String.format(
+        "Application %s failed %d times%s%s due to %s. Failing the application.",
+          getApplicationId(),
+          maxAppAttempts,
+          (attemptFailuresValidityInterval <= 0 ? ""
+               : (" in previous " + attemptFailuresValidityInterval
+                  + " milliseconds")),
+          (globalLimit == maxAppAttempts) ? ""
+              : (" (global limit =" + globalLimit
+                 + "; local limit is =" + maxAppAttempts + ")"),
+          failedEvent.getDiagnostics());
     }
     return msg;
   }
@@ -993,10 +1085,10 @@ public class RMAppImpl implements RMApp, Recoverable {
     default:
       break;
     }
-    ApplicationState appState =
-        new ApplicationState(this.submitTime, this.startTime,
-          this.submissionContext, this.user, stateToBeStored, diags,
-          this.storedFinishTime);
+    ApplicationStateData appState =
+        ApplicationStateData.newInstance(this.submitTime, this.startTime,
+            this.user, this.submissionContext,
+            stateToBeStored, diags, this.storedFinishTime);
     this.rmContext.getStateStore().updateApplicationState(appState);
   }
 
@@ -1125,6 +1217,7 @@ public class RMAppImpl implements RMApp, Recoverable {
     }
 
     public void transition(RMAppImpl app, RMAppEvent event) {
+      app.logAggregationStartTime = System.currentTimeMillis();
       for (NodeId nodeId : app.getRanNodes()) {
         app.handler.handle(
             new RMNodeCleanAppEvent(nodeId, app.applicationId));
@@ -1179,8 +1272,21 @@ public class RMAppImpl implements RMApp, Recoverable {
     @Override
     public RMAppState transition(RMAppImpl app, RMAppEvent event) {
       int numberOfFailure = app.getNumFailedAppAttempts();
+      LOG.info("The number of failed attempts"
+          + (app.attemptFailuresValidityInterval > 0 ? " in previous "
+              + app.attemptFailuresValidityInterval + " milliseconds " : " ")
+          + "is " + numberOfFailure + ". The max attempts is "
+          + app.maxAppAttempts);
       if (!app.submissionContext.getUnmanagedAM()
           && numberOfFailure < app.maxAppAttempts) {
+        if (initialState.equals(RMAppState.KILLING)) {
+          // If this is not last attempt, app should be killed instead of
+          // launching a new attempt
+          app.rememberTargetTransitionsAndStoreState(event,
+            new AppKilledTransition(), RMAppState.KILLED, RMAppState.KILLED);
+          return RMAppState.FINAL_SAVING;
+        }
+
         boolean transferStateFromPreviousAttempt;
         RMAppFailedAttemptEvent failedEvent = (RMAppFailedAttemptEvent) event;
         transferStateFromPreviousAttempt =
@@ -1195,7 +1301,7 @@ public class RMAppImpl implements RMApp, Recoverable {
         // finished containers so that they can be acked to NM,
         // but when pulling finished container we will check this flag again.
         ((RMAppAttemptImpl) app.currentAttempt)
-          .transferStateFromPreviousAttempt(oldAttempt);
+          .transferStateFromAttempt(oldAttempt);
         return initialState;
       } else {
         if (numberOfFailure >= app.maxAppAttempts) {
@@ -1292,5 +1398,277 @@ public class RMAppImpl implements RMApp, Recoverable {
   @VisibleForTesting
   public void setSystemClock(Clock clock) {
     this.systemClock = clock;
+  }
+
+  @Override
+  public ReservationId getReservationId() {
+    return submissionContext.getReservationID();
+  }
+  
+  @Override
+  public ResourceRequest getAMResourceRequest() {
+    return this.amReq; 
+  }
+
+  protected Credentials parseCredentials() throws IOException {
+    Credentials credentials = new Credentials();
+    DataInputByteBuffer dibb = new DataInputByteBuffer();
+    ByteBuffer tokens = submissionContext.getAMContainerSpec().getTokens();
+    if (tokens != null) {
+      dibb.reset(tokens);
+      credentials.readTokenStorageStream(dibb);
+      tokens.rewind();
+    }
+    return credentials;
+  }
+
+  @Override
+  public Map<NodeId, LogAggregationReport> getLogAggregationReportsForApp() {
+    try {
+      this.readLock.lock();
+      Map<NodeId, LogAggregationReport> outputs =
+          new HashMap<NodeId, LogAggregationReport>();
+      outputs.putAll(logAggregationStatus);
+      if (!isLogAggregationFinished()) {
+        for (Entry<NodeId, LogAggregationReport> output : outputs.entrySet()) {
+          if (!output.getValue().getLogAggregationStatus()
+            .equals(LogAggregationStatus.TIME_OUT)
+              && !output.getValue().getLogAggregationStatus()
+                .equals(LogAggregationStatus.SUCCEEDED)
+              && !output.getValue().getLogAggregationStatus()
+                .equals(LogAggregationStatus.FAILED)
+              && isAppInFinalState(this)
+              && System.currentTimeMillis() > this.logAggregationStartTime
+                  + this.logAggregationStatusTimeout) {
+            output.getValue().setLogAggregationStatus(
+              LogAggregationStatus.TIME_OUT);
+          }
+        }
+      }
+      return outputs;
+    } finally {
+      this.readLock.unlock();
+    }
+  }
+
+  public void aggregateLogReport(NodeId nodeId, LogAggregationReport report) {
+    try {
+      this.writeLock.lock();
+      if (this.logAggregationEnabled && !isLogAggregationFinished()) {
+        LogAggregationReport curReport = this.logAggregationStatus.get(nodeId);
+        boolean stateChangedToFinal = false;
+        if (curReport == null) {
+          this.logAggregationStatus.put(nodeId, report);
+          if (isLogAggregationFinishedForNM(report)) {
+            stateChangedToFinal = true;
+          }
+        } else {
+          if (isLogAggregationFinishedForNM(report)) {
+            if (!isLogAggregationFinishedForNM(curReport)) {
+              stateChangedToFinal = true;
+            }
+          }
+          if (report.getLogAggregationStatus() != LogAggregationStatus.RUNNING
+              || curReport.getLogAggregationStatus() !=
+                  LogAggregationStatus.RUNNING_WITH_FAILURE) {
+            if (curReport.getLogAggregationStatus()
+                == LogAggregationStatus.TIME_OUT
+                && report.getLogAggregationStatus()
+                    == LogAggregationStatus.RUNNING) {
+            // If the log aggregation status got from latest nm heartbeat
+            // is Running, and current log aggregation status is TimeOut,
+            // based on whether there are any failure messages for this NM,
+            // we will reset the log aggregation status as RUNNING or
+            // RUNNING_WITH_FAILURE
+              if (logAggregationFailureMessagesForNMs.get(nodeId) != null &&
+                  !logAggregationFailureMessagesForNMs.get(nodeId).isEmpty()) {
+                report.setLogAggregationStatus(
+                    LogAggregationStatus.RUNNING_WITH_FAILURE);
+              }
+            }
+            curReport.setLogAggregationStatus(report
+              .getLogAggregationStatus());
+          }
+        }
+        updateLogAggregationDiagnosticMessages(nodeId, report);
+        if (isAppInFinalState(this) && stateChangedToFinal) {
+          updateLogAggregationStatus(nodeId);
+        }
+      }
+    } finally {
+      this.writeLock.unlock();
+    }
+  }
+
+  @Override
+  public LogAggregationStatus getLogAggregationStatusForAppReport() {
+    try {
+      this.readLock.lock();
+      if (! logAggregationEnabled) {
+        return LogAggregationStatus.DISABLED;
+      }
+      if (isLogAggregationFinished()) {
+        return this.logAggregationStatusForAppReport;
+      }
+      Map<NodeId, LogAggregationReport> reports =
+          getLogAggregationReportsForApp();
+      if (reports.size() == 0) {
+        return this.logAggregationStatusForAppReport;
+      }
+      int logNotStartCount = 0;
+      int logCompletedCount = 0;
+      int logTimeOutCount = 0;
+      int logFailedCount = 0;
+      int logRunningWithFailure = 0;
+      for (Entry<NodeId, LogAggregationReport> report : reports.entrySet()) {
+        switch (report.getValue().getLogAggregationStatus()) {
+          case NOT_START:
+            logNotStartCount++;
+            break;
+          case RUNNING_WITH_FAILURE:
+            logRunningWithFailure ++;
+            break;
+          case SUCCEEDED:
+            logCompletedCount++;
+            break;
+          case FAILED:
+            logFailedCount++;
+            logCompletedCount++;
+            break;
+          case TIME_OUT:
+            logTimeOutCount++;
+            logCompletedCount++;
+            break;
+          default:
+            break;
+        }
+      }
+      if (logNotStartCount == reports.size()) {
+        return LogAggregationStatus.NOT_START;
+      } else if (logCompletedCount == reports.size()) {
+        // We should satisfy two condition in order to return SUCCEEDED or FAILED
+        // 1) make sure the application is in final state
+        // 2) logs status from all NMs are SUCCEEDED/FAILED/TIMEOUT
+        // The SUCCEEDED/FAILED status is the final status which means
+        // the log aggregation is finished. And the log aggregation status will
+        // not be updated anymore.
+        if (logFailedCount > 0 && isAppInFinalState(this)) {
+          return LogAggregationStatus.FAILED;
+        } else if (logTimeOutCount > 0) {
+          return LogAggregationStatus.TIME_OUT;
+        }
+        if (isAppInFinalState(this)) {
+          return LogAggregationStatus.SUCCEEDED;
+        }
+      } else if (logRunningWithFailure > 0) {
+        return LogAggregationStatus.RUNNING_WITH_FAILURE;
+      }
+      return LogAggregationStatus.RUNNING;
+    } finally {
+      this.readLock.unlock();
+    }
+  }
+
+  private boolean isLogAggregationFinished() {
+    return this.logAggregationStatusForAppReport
+      .equals(LogAggregationStatus.SUCCEEDED)
+        || this.logAggregationStatusForAppReport
+          .equals(LogAggregationStatus.FAILED);
+
+  }
+
+  private boolean isLogAggregationFinishedForNM(LogAggregationReport report) {
+    return report.getLogAggregationStatus() == LogAggregationStatus.SUCCEEDED
+        || report.getLogAggregationStatus() == LogAggregationStatus.FAILED;
+  }
+
+  private void updateLogAggregationDiagnosticMessages(NodeId nodeId,
+      LogAggregationReport report) {
+    if (report.getDiagnosticMessage() != null
+        && !report.getDiagnosticMessage().isEmpty()) {
+      if (report.getLogAggregationStatus()
+          == LogAggregationStatus.RUNNING ) {
+        List<String> diagnostics = logAggregationDiagnosticsForNMs.get(nodeId);
+        if (diagnostics == null) {
+          diagnostics = new ArrayList<String>();
+          logAggregationDiagnosticsForNMs.put(nodeId, diagnostics);
+        } else {
+          if (diagnostics.size()
+              == maxLogAggregationDiagnosticsInMemory) {
+            diagnostics.remove(0);
+          }
+        }
+        diagnostics.add(report.getDiagnosticMessage());
+        this.logAggregationStatus.get(nodeId).setDiagnosticMessage(
+          StringUtils.join(diagnostics, "\n"));
+      } else if (report.getLogAggregationStatus()
+          == LogAggregationStatus.RUNNING_WITH_FAILURE) {
+        List<String> failureMessages =
+            logAggregationFailureMessagesForNMs.get(nodeId);
+        if (failureMessages == null) {
+          failureMessages = new ArrayList<String>();
+          logAggregationFailureMessagesForNMs.put(nodeId, failureMessages);
+        } else {
+          if (failureMessages.size()
+              == maxLogAggregationDiagnosticsInMemory) {
+            failureMessages.remove(0);
+          }
+        }
+        failureMessages.add(report.getDiagnosticMessage());
+      }
+    }
+  }
+
+  private void updateLogAggregationStatus(NodeId nodeId) {
+    LogAggregationStatus status =
+        this.logAggregationStatus.get(nodeId).getLogAggregationStatus();
+    if (status.equals(LogAggregationStatus.SUCCEEDED)) {
+      this.logAggregationSucceed++;
+    } else if (status.equals(LogAggregationStatus.FAILED)) {
+      this.logAggregationFailed++;
+    }
+    if (this.logAggregationSucceed == this.logAggregationStatus.size()) {
+      this.logAggregationStatusForAppReport =
+          LogAggregationStatus.SUCCEEDED;
+      // Since the log aggregation status for this application for all NMs
+      // is SUCCEEDED, it means all logs are aggregated successfully.
+      // We could remove all the cached log aggregation reports
+      this.logAggregationStatus.clear();
+      this.logAggregationDiagnosticsForNMs.clear();
+      this.logAggregationFailureMessagesForNMs.clear();
+    } else if (this.logAggregationSucceed + this.logAggregationFailed
+        == this.logAggregationStatus.size()) {
+      this.logAggregationStatusForAppReport = LogAggregationStatus.FAILED;
+      // We have collected the log aggregation status for all NMs.
+      // The log aggregation status is FAILED which means the log
+      // aggregation fails in some NMs. We are only interested in the
+      // nodes where the log aggregation is failed. So we could remove
+      // the log aggregation details for those succeeded NMs
+      for (Iterator<Map.Entry<NodeId, LogAggregationReport>> it =
+          this.logAggregationStatus.entrySet().iterator(); it.hasNext();) {
+        Map.Entry<NodeId, LogAggregationReport> entry = it.next();
+        if (entry.getValue().getLogAggregationStatus()
+          .equals(LogAggregationStatus.SUCCEEDED)) {
+          it.remove();
+        }
+      }
+      // the log aggregation has finished/failed.
+      // and the status will not be updated anymore.
+      this.logAggregationDiagnosticsForNMs.clear();
+    }
+  }
+
+  public String getLogAggregationFailureMessagesForNM(NodeId nodeId) {
+    try {
+      this.readLock.lock();
+      List<String> failureMessages =
+          this.logAggregationFailureMessagesForNMs.get(nodeId);
+      if (failureMessages == null || failureMessages.isEmpty()) {
+        return StringUtils.EMPTY;
+      }
+      return StringUtils.join(failureMessages, "\n");
+    } finally {
+      this.readLock.unlock();
+    }
   }
 }

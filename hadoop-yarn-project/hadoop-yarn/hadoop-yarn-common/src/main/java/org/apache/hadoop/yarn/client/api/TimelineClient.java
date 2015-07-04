@@ -22,7 +22,8 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
-import org.apache.hadoop.classification.InterfaceStability.Unstable;
+import org.apache.hadoop.classification.InterfaceStability.Evolving;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
@@ -37,9 +38,18 @@ import org.apache.hadoop.yarn.security.client.TimelineDelegationTokenIdentifier;
  * number of conceptual entities.
  */
 @Public
-@Unstable
+@Evolving
 public abstract class TimelineClient extends AbstractService {
 
+  /**
+   * Create a timeline client. The current UGI when the user initialize the
+   * client will be used to do the put and the delegation token operations. The
+   * current user may use {@link UserGroupInformation#doAs} another user to
+   * construct and initialize a timeline client if the following operations are
+   * supposed to be conducted by that user.
+   *
+   * @return a timeline client
+   */
   @Public
   public static TimelineClient createTimelineClient() {
     TimelineClient client = new TimelineClientImpl();
@@ -102,4 +112,34 @@ public abstract class TimelineClient extends AbstractService {
   public abstract Token<TimelineDelegationTokenIdentifier> getDelegationToken(
       String renewer) throws IOException, YarnException;
 
+  /**
+   * <p>
+   * Renew a timeline delegation token.
+   * </p>
+   * 
+   * @param timelineDT
+   *          the delegation token to renew
+   * @return the new expiration time
+   * @throws IOException
+   * @throws YarnException
+   */
+  @Public
+  public abstract long renewDelegationToken(
+      Token<TimelineDelegationTokenIdentifier> timelineDT)
+          throws IOException, YarnException;
+
+  /**
+   * <p>
+   * Cancel a timeline delegation token.
+   * </p>
+   * 
+   * @param timelineDT
+   *          the delegation token to cancel
+   * @throws IOException
+   * @throws YarnException
+   */
+  @Public
+  public abstract void cancelDelegationToken(
+      Token<TimelineDelegationTokenIdentifier> timelineDT)
+          throws IOException, YarnException;
 }

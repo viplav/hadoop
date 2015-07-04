@@ -49,9 +49,9 @@ import org.apache.hadoop.security.UserGroupInformation;
  * <code>GenericOptionsParser</code> is a utility to parse command line
  * arguments generic to the Hadoop framework. 
  * 
- * <code>GenericOptionsParser</code> recognizes several standarad command 
+ * <code>GenericOptionsParser</code> recognizes several standard command
  * line arguments, enabling applications to easily specify a namenode, a 
- * jobtracker, additional configuration resources etc.
+ * ResourceManager, additional configuration resources etc.
  * 
  * <h4 id="GenericOptions">Generic Options</h4>
  * 
@@ -60,7 +60,7 @@ import org.apache.hadoop.security.UserGroupInformation;
  *     -conf &lt;configuration file&gt;     specify a configuration file
  *     -D &lt;property=value&gt;            use value for given property
  *     -fs &lt;local|namenode:port&gt;      specify a namenode
- *     -jt &lt;local|jobtracker:port&gt;    specify a job tracker
+ *     -jt &lt;local|resourcemanager:port&gt;    specify a ResourceManager
  *     -files &lt;comma separated list of files&gt;    specify comma separated
  *                            files to be copied to the map reduce cluster
  *     -libjars &lt;comma separated list of jars&gt;   specify comma separated
@@ -90,13 +90,13 @@ import org.apache.hadoop.security.UserGroupInformation;
  *     
  * $ bin/hadoop dfs -conf core-site.xml -conf hdfs-site.xml -ls /data
  * list /data directory in dfs with multiple conf files specified.
- *     
- * $ bin/hadoop job -D mapred.job.tracker=darwin:50020 -submit job.xml
- * submit a job to job tracker darwin:50020
- *     
- * $ bin/hadoop job -jt darwin:50020 -submit job.xml
- * submit a job to job tracker darwin:50020
- *     
+ *
+ * $ bin/hadoop job -D yarn.resourcemanager.address=darwin:8032 -submit job.xml
+ * submit a job to ResourceManager darwin:8032
+ *
+ * $ bin/hadoop job -jt darwin:8032 -submit job.xml
+ * submit a job to ResourceManager darwin:8032
+ *
  * $ bin/hadoop job -jt local -submit job.xml
  * submit a job to local runner
  * 
@@ -213,9 +213,9 @@ public class GenericOptionsParser {
     .hasArg()
     .withDescription("specify a namenode")
     .create("fs");
-    Option jt = OptionBuilder.withArgName("local|jobtracker:port")
+    Option jt = OptionBuilder.withArgName("local|resourcemanager:port")
     .hasArg()
-    .withDescription("specify a job tracker")
+    .withDescription("specify a ResourceManager")
     .create("jt");
     Option oconf = OptionBuilder.withArgName("configuration file")
     .hasArg()
@@ -284,6 +284,17 @@ public class GenericOptionsParser {
         conf.addResource(new Path(value));
       }
     }
+
+    if (line.hasOption('D')) {
+      String[] property = line.getOptionValues('D');
+      for(String prop : property) {
+        String[] keyval = prop.split("=", 2);
+        if (keyval.length == 2) {
+          conf.set(keyval[0], keyval[1], "from command line");
+        }
+      }
+    }
+
     if (line.hasOption("libjars")) {
       conf.set("tmpjars", 
                validateFiles(line.getOptionValue("libjars"), conf),
@@ -306,15 +317,6 @@ public class GenericOptionsParser {
       conf.set("tmparchives", 
                 validateFiles(line.getOptionValue("archives"), conf),
                 "from -archives command line option");
-    }
-    if (line.hasOption('D')) {
-      String[] property = line.getOptionValues('D');
-      for(String prop : property) {
-        String[] keyval = prop.split("=", 2);
-        if (keyval.length == 2) {
-          conf.set(keyval[0], keyval[1], "from command line");
-        }
-      }
     }
     conf.setBoolean("mapreduce.client.genericoptionsparser.used", true);
     
@@ -408,7 +410,7 @@ public class GenericOptionsParser {
       else {
         // check if the file exists in this file system
         // we need to recreate this filesystem object to copy
-        // these files to the file system jobtracker is running
+        // these files to the file system ResourceManager is running
         // on.
         FileSystem fs = path.getFileSystem(conf);
         if (!fs.exists(path)) {
@@ -502,7 +504,7 @@ public class GenericOptionsParser {
     out.println("-conf <configuration file>     specify an application configuration file");
     out.println("-D <property=value>            use value for given property");
     out.println("-fs <local|namenode:port>      specify a namenode");
-    out.println("-jt <local|jobtracker:port>    specify a job tracker");
+    out.println("-jt <local|resourcemanager:port>    specify a ResourceManager");
     out.println("-files <comma separated list of files>    " + 
       "specify comma separated files to be copied to the map reduce cluster");
     out.println("-libjars <comma separated list of jars>    " +
@@ -511,7 +513,7 @@ public class GenericOptionsParser {
                 "specify comma separated archives to be unarchived" +
                 " on the compute machines.\n");
     out.println("The general command line syntax is");
-    out.println("bin/hadoop command [genericOptions] [commandOptions]\n");
+    out.println("command [genericOptions] [commandOptions]\n");
   }
   
 }

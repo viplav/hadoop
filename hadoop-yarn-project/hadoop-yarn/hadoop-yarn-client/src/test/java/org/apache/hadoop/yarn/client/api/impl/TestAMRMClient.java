@@ -18,7 +18,6 @@
 
 package org.apache.hadoop.yarn.client.api.impl;
 
-import com.google.common.base.Supplier;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -39,8 +38,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-import org.junit.Assert;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -73,6 +72,7 @@ import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.client.ClientRMProxy;
 import org.apache.hadoop.yarn.client.api.AMRMClient;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
+import org.apache.hadoop.yarn.client.api.InvalidContainerRequestException;
 import org.apache.hadoop.yarn.client.api.NMTokenCache;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -87,12 +87,15 @@ import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.junit.After;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.mortbay.log.Log;
+
+import com.google.common.base.Supplier;
 
 public class TestAMRMClient {
   static Configuration conf = null;
@@ -197,8 +200,11 @@ public class TestAMRMClient {
     // of testing.
     UserGroupInformation.setLoginUser(UserGroupInformation
       .createRemoteUser(UserGroupInformation.getCurrentUser().getUserName()));
-    appAttempt.getAMRMToken().setService(ClientRMProxy.getAMRMTokenService(conf));
+
+    // emulate RM setup of AMRM token in credentials by adding the token
+    // *before* setting the token service
     UserGroupInformation.getCurrentUser().addToken(appAttempt.getAMRMToken());
+    appAttempt.getAMRMToken().setService(ClientRMProxy.getAMRMTokenService(conf));
   }
   
   @After
@@ -666,6 +672,64 @@ public class TestAMRMClient {
       }
     }
   }
+  
+  @Test(timeout=30000)
+  public void testAskWithNodeLabels() {
+    AMRMClientImpl<ContainerRequest> client =
+        new AMRMClientImpl<ContainerRequest>();
+
+    // add exp=x to ANY
+    client.addContainerRequest(new ContainerRequest(Resource.newInstance(1024,
+        1), null, null, Priority.UNDEFINED, true, "x"));
+    Assert.assertEquals(1, client.ask.size());
+    Assert.assertEquals("x", client.ask.iterator().next()
+        .getNodeLabelExpression());
+
+    // add exp=x then add exp=a to ANY in same priority, only exp=a should kept
+    client.addContainerRequest(new ContainerRequest(Resource.newInstance(1024,
+        1), null, null, Priority.UNDEFINED, true, "x"));
+    client.addContainerRequest(new ContainerRequest(Resource.newInstance(1024,
+        1), null, null, Priority.UNDEFINED, true, "a"));
+    Assert.assertEquals(1, client.ask.size());
+    Assert.assertEquals("a", client.ask.iterator().next()
+        .getNodeLabelExpression());
+    
+    // add exp=x to ANY, rack and node, only resource request has ANY resource
+    // name will be assigned the label expression
+    // add exp=x then add exp=a to ANY in same priority, only exp=a should kept
+    client.addContainerRequest(new ContainerRequest(Resource.newInstance(1024,
+        1), null, null, Priority.UNDEFINED, true,
+        "y"));
+    Assert.assertEquals(1, client.ask.size());
+    for (ResourceRequest req : client.ask) {
+      if (ResourceRequest.ANY.equals(req.getResourceName())) {
+        Assert.assertEquals("y", req.getNodeLabelExpression());
+      } else {
+        Assert.assertNull(req.getNodeLabelExpression());
+      }
+    }
+  }
+  
+  private void verifyAddRequestFailed(AMRMClient<ContainerRequest> client,
+      ContainerRequest request) {
+    try {
+      client.addContainerRequest(request);
+    } catch (InvalidContainerRequestException e) {
+      return;
+    }
+    Assert.fail();
+  }
+  
+  @Test(timeout=30000)
+  public void testAskWithInvalidNodeLabels() {
+    AMRMClientImpl<ContainerRequest> client =
+        new AMRMClientImpl<ContainerRequest>();
+
+    // specified exp with more than one node labels
+    verifyAddRequestFailed(client,
+        new ContainerRequest(Resource.newInstance(1024, 1), null, null,
+            Priority.UNDEFINED, true, "x && y"));
+  }
     
   private void testAllocation(final AMRMClientImpl<ContainerRequest> amClient)  
       throws YarnException, IOException {
@@ -907,7 +971,38 @@ public class TestAMRMClient {
       Assert.assertNotEquals(amrmToken_1, amrmToken_2);
 
       // can do the allocate call with latest AMRMToken
-      amClient.allocate(0.1f);
+      AllocateResponse response = amClient.allocate(0.1f);
+      
+      // Verify latest AMRMToken can be used to send allocation request.
+      UserGroupInformation testUser1 =
+          UserGroupInformation.createRemoteUser("testUser1");
+      
+      AMRMTokenIdentifierForTest newVersionTokenIdentifier = 
+          new AMRMTokenIdentifierForTest(amrmToken_2.decodeIdentifier(), "message");
+      
+      Assert.assertEquals("Message is changed after set to newVersionTokenIdentifier",
+          "message", newVersionTokenIdentifier.getMessage());
+      org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> newVersionToken = 
+          new org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> (
+              newVersionTokenIdentifier.getBytes(), 
+              amrmTokenSecretManager.retrievePassword(newVersionTokenIdentifier),
+              newVersionTokenIdentifier.getKind(), new Text());
+      
+      SecurityUtil.setTokenService(newVersionToken, yarnCluster
+        .getResourceManager().getApplicationMasterService().getBindAddress());
+      testUser1.addToken(newVersionToken);
+      
+      AllocateRequest request = Records.newRecord(AllocateRequest.class);
+      request.setResponseId(response.getResponseId());
+      testUser1.doAs(new PrivilegedAction<ApplicationMasterProtocol>() {
+        @Override
+        public ApplicationMasterProtocol run() {
+          return (ApplicationMasterProtocol) YarnRPC.create(conf).getProxy(
+            ApplicationMasterProtocol.class,
+            yarnCluster.getResourceManager().getApplicationMasterService()
+                .getBindAddress(), conf);
+        }
+      }).allocate(request);
 
       // Make sure previous token has been rolled-over
       // and can not use this rolled-over token to make a allocate all.
@@ -931,12 +1026,12 @@ public class TestAMRMClient {
       }
 
       try {
-        UserGroupInformation testUser =
-            UserGroupInformation.createRemoteUser("testUser");
+        UserGroupInformation testUser2 =
+            UserGroupInformation.createRemoteUser("testUser2");
         SecurityUtil.setTokenService(amrmToken_2, yarnCluster
           .getResourceManager().getApplicationMasterService().getBindAddress());
-        testUser.addToken(amrmToken_2);
-        testUser.doAs(new PrivilegedAction<ApplicationMasterProtocol>() {
+        testUser2.addToken(amrmToken_2);
+        testUser2.doAs(new PrivilegedAction<ApplicationMasterProtocol>() {
           @Override
           public ApplicationMasterProtocol run() {
             return (ApplicationMasterProtocol) YarnRPC.create(conf).getProxy(
@@ -970,13 +1065,18 @@ public class TestAMRMClient {
         UserGroupInformation.getCurrentUser().getCredentials();
     Iterator<org.apache.hadoop.security.token.Token<?>> iter =
         credentials.getAllTokens().iterator();
+    org.apache.hadoop.security.token.Token<AMRMTokenIdentifier> result = null;
     while (iter.hasNext()) {
       org.apache.hadoop.security.token.Token<?> token = iter.next();
       if (token.getKind().equals(AMRMTokenIdentifier.KIND_NAME)) {
-        return (org.apache.hadoop.security.token.Token<AMRMTokenIdentifier>)
+        if (result != null) {
+          Assert.fail("credentials has more than one AMRM token."
+              + " token1: " + result + " token2: " + token);
+        }
+        result = (org.apache.hadoop.security.token.Token<AMRMTokenIdentifier>)
             token;
       }
     }
-    return null;
+    return result;
   }
 }

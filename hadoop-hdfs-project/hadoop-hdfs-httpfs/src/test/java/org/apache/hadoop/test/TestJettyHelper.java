@@ -24,6 +24,7 @@ import java.net.ServerSocket;
 import java.net.URL;
 import java.net.UnknownHostException;
 
+import org.apache.hadoop.security.ssl.SslSocketConnectorSecure;
 import org.junit.Test;
 import org.junit.rules.MethodRule;
 import org.junit.runners.model.FrameworkMethod;
@@ -51,7 +52,7 @@ public class TestJettyHelper implements MethodRule {
     this.keyStorePassword = keyStorePassword;
   }
 
-  private static ThreadLocal<TestJettyHelper> TEST_JETTY_TL =
+  private static final ThreadLocal<TestJettyHelper> TEST_JETTY_TL =
       new InheritableThreadLocal<TestJettyHelper>();
 
   @Override
@@ -92,7 +93,7 @@ public class TestJettyHelper implements MethodRule {
         server.getConnectors()[0].setHost(host);
         server.getConnectors()[0].setPort(port);
       } else {
-        SslSocketConnector c = new SslSocketConnector();
+        SslSocketConnector c = new SslSocketConnectorSecure();
         c.setHost(host);
         c.setPort(port);
         c.setNeedClientAuth(false);

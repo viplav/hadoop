@@ -25,9 +25,10 @@ import java.util.EnumSet;
 import java.util.List;
 
 import com.google.common.collect.Lists;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.fs.BatchedRemoteIterator.BatchedEntries;
 import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.ContentSummary;
@@ -36,6 +37,7 @@ import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FsServerDefaults;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.ParentNotDirectoryException;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.XAttrSetFlag;
@@ -43,7 +45,7 @@ import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hdfs.inotify.EventsList;
+import org.apache.hadoop.hdfs.inotify.EventBatchList;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
@@ -62,6 +64,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.NSQuotaExceededException;
@@ -82,6 +85,7 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.AllowS
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.AppendRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.AppendResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CachePoolEntryProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CheckAccessRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CompleteRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ConcatRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CreateRequestProto;
@@ -118,8 +122,8 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSna
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingResponseProto;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePolicySuiteRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePolicySuiteResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.IsFileClosedRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCacheDirectivesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.ListCacheDirectivesResponseProto;
@@ -152,15 +156,14 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.SetQuo
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.SetReplicationRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.SetSafeModeRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.SetTimesRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.TruncateRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.UpdateBlockForPipelineRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.UpdatePipelineRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CheckAccessRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.SetStoragePolicyRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos;
 import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.CreateEncryptionZoneRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.GetEZForPathRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos.ListEncryptionZonesRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.GetXAttrsRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.ListXAttrsRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.XAttrProtos.RemoveXAttrRequestProto;
@@ -186,7 +189,6 @@ import org.apache.hadoop.security.token.Token;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.ServiceException;
-
 
 import static org.apache.hadoop.fs.BatchedRemoteIterator.BatchedListEntries;
 import static org.apache.hadoop.hdfs.protocol.proto.EncryptionZonesProtos
@@ -226,9 +228,9 @@ public class ClientNamenodeProtocolTranslatorPB implements
   VOID_GET_DATA_ENCRYPTIONKEY_REQUEST =
       GetDataEncryptionKeyRequestProto.newBuilder().build();
 
-  private final static GetStoragePolicySuiteRequestProto
-  VOID_GET_STORAGE_POLICY_SUITE_REQUEST =
-      GetStoragePolicySuiteRequestProto.newBuilder().build();
+  private final static GetStoragePoliciesRequestProto
+  VOID_GET_STORAGE_POLICIES_REQUEST =
+      GetStoragePoliciesRequestProto.newBuilder().build();
 
   public ClientNamenodeProtocolTranslatorPB(ClientNamenodeProtocolPB proxy) {
     rpcProxy = proxy;
@@ -274,7 +276,7 @@ public class ClientNamenodeProtocolTranslatorPB implements
   public HdfsFileStatus create(String src, FsPermission masked,
       String clientName, EnumSetWritable<CreateFlag> flag,
       boolean createParent, short replication, long blockSize, 
-      List<CipherSuite> cipherSuites)
+      CryptoProtocolVersion[] supportedVersions)
       throws AccessControlException, AlreadyBeingCreatedException,
       DSQuotaExceededException, FileAlreadyExistsException,
       FileNotFoundException, NSQuotaExceededException,
@@ -288,9 +290,7 @@ public class ClientNamenodeProtocolTranslatorPB implements
         .setCreateParent(createParent)
         .setReplication(replication)
         .setBlockSize(blockSize);
-    if (cipherSuites != null) {
-      builder.addAllCipherSuites(PBHelper.convertCipherSuites(cipherSuites));
-    }
+    builder.addAllCryptoProtocolVersion(PBHelper.convert(supportedVersions));
     CreateRequestProto req = builder.build();
     try {
       CreateResponseProto res = rpcProxy.create(null, req);
@@ -302,17 +302,35 @@ public class ClientNamenodeProtocolTranslatorPB implements
   }
 
   @Override
-  public LocatedBlock append(String src, String clientName)
-      throws AccessControlException, DSQuotaExceededException,
-      FileNotFoundException, SafeModeException, UnresolvedLinkException,
-      IOException {
-    AppendRequestProto req = AppendRequestProto.newBuilder()
+  public boolean truncate(String src, long newLength, String clientName)
+      throws IOException, UnresolvedLinkException {
+    TruncateRequestProto req = TruncateRequestProto.newBuilder()
         .setSrc(src)
+        .setNewLength(newLength)
         .setClientName(clientName)
         .build();
     try {
+      return rpcProxy.truncate(null, req).getResult();
+    } catch (ServiceException e) {
+      throw ProtobufHelper.getRemoteException(e);
+    }
+  }
+
+  @Override
+  public LastBlockWithStatus append(String src, String clientName,
+      EnumSetWritable<CreateFlag> flag) throws AccessControlException,
+      DSQuotaExceededException, FileNotFoundException, SafeModeException,
+      UnresolvedLinkException, IOException {
+    AppendRequestProto req = AppendRequestProto.newBuilder().setSrc(src)
+        .setClientName(clientName).setFlag(PBHelper.convertCreateFlag(flag))
+        .build();
+    try {
       AppendResponseProto res = rpcProxy.append(null, req);
-      return res.hasBlock() ? PBHelper.convert(res.getBlock()) : null;
+      LocatedBlock lastBlock = res.hasBlock() ? PBHelper
+          .convert(res.getBlock()) : null;
+      HdfsFileStatus stat = (res.hasStat()) ? PBHelper.convert(res.getStat())
+          : null;
+      return new LastBlockWithStatus(lastBlock, stat);
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }
@@ -652,9 +670,11 @@ public class ClientNamenodeProtocolTranslatorPB implements
   }
 
   @Override
-  public void saveNamespace() throws AccessControlException, IOException {
+  public boolean saveNamespace(long timeWindow, long txGap) throws IOException {
     try {
-      rpcProxy.saveNamespace(null, VOID_SAVE_NAMESPACE_REQUEST);
+      SaveNamespaceRequestProto req = SaveNamespaceRequestProto.newBuilder()
+          .setTimeWindow(timeWindow).setTxGap(txGap).build();
+      return rpcProxy.saveNamespace(null, req).getSaved();
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }
@@ -788,14 +808,19 @@ public class ClientNamenodeProtocolTranslatorPB implements
   }
 
   @Override
-  public void setQuota(String path, long namespaceQuota, long diskspaceQuota)
+  public void setQuota(String path, long namespaceQuota, long storagespaceQuota,
+                       StorageType type)
       throws AccessControlException, FileNotFoundException,
       UnresolvedLinkException, IOException {
-    SetQuotaRequestProto req = SetQuotaRequestProto.newBuilder()
+    final SetQuotaRequestProto.Builder builder
+        = SetQuotaRequestProto.newBuilder()
         .setPath(path)
         .setNamespaceQuota(namespaceQuota)
-        .setDiskspaceQuota(diskspaceQuota)
-        .build();
+        .setStoragespaceQuota(storagespaceQuota);
+    if (type != null) {
+      builder.setStorageType(PBHelper.convertStorageType(type));
+    }
+    final SetQuotaRequestProto req = builder.build();
     try {
       rpcProxy.setQuota(null, req);
     } catch (ServiceException e) {
@@ -1348,7 +1373,11 @@ public class ClientNamenodeProtocolTranslatorPB implements
     try {
       final EncryptionZonesProtos.GetEZForPathResponseProto response =
           rpcProxy.getEZForPath(null, req);
-      return PBHelper.convert(response.getZone());
+      if (response.hasZone()) {
+        return PBHelper.convert(response.getZone());
+      } else {
+        return null;
+      }
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }
@@ -1456,10 +1485,10 @@ public class ClientNamenodeProtocolTranslatorPB implements
   }
 
   @Override
-  public BlockStoragePolicy[] getStoragePolicySuite() throws IOException {
+  public BlockStoragePolicy[] getStoragePolicies() throws IOException {
     try {
-      GetStoragePolicySuiteResponseProto response = rpcProxy
-          .getStoragePolicySuite(null, VOID_GET_STORAGE_POLICY_SUITE_REQUEST);
+      GetStoragePoliciesResponseProto response = rpcProxy
+          .getStoragePolicies(null, VOID_GET_STORAGE_POLICIES_REQUEST);
       return PBHelper.convertStoragePolicies(response.getPoliciesList());
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
@@ -1477,7 +1506,7 @@ public class ClientNamenodeProtocolTranslatorPB implements
   }
 
   @Override
-  public EventsList getEditsFromTxid(long txid) throws IOException {
+  public EventBatchList getEditsFromTxid(long txid) throws IOException {
     GetEditsFromTxidRequestProto req = GetEditsFromTxidRequestProto.newBuilder()
         .setTxid(txid).build();
     try {

@@ -25,11 +25,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.RequestResult;
-import com.microsoft.windowsazure.storage.ResponseReceivedEvent;
-import com.microsoft.windowsazure.storage.SendingRequestEvent;
-import com.microsoft.windowsazure.storage.StorageEvent;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.RequestResult;
+import com.microsoft.azure.storage.ResponseReceivedEvent;
+import com.microsoft.azure.storage.SendingRequestEvent;
+import com.microsoft.azure.storage.StorageEvent;
 
 /*
  * Self throttling is implemented by hooking into send & response callbacks 
@@ -68,12 +68,14 @@ public class SelfThrottlingIntercept {
 
   private final float readFactor;
   private final float writeFactor;
+  private final OperationContext operationContext;
 
   // Concurrency: access to non-final members must be thread-safe
   private long lastE2Elatency;
 
-  public SelfThrottlingIntercept(OperationContext operationContext,
+  public SelfThrottlingIntercept(OperationContext operationContext, 
       float readFactor, float writeFactor) {
+    this.operationContext = operationContext;
     this.readFactor = readFactor;
     this.writeFactor = writeFactor;
   }

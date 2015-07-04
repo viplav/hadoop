@@ -82,9 +82,9 @@ class YarnChild {
     final InetSocketAddress address =
         NetUtils.createSocketAddrForHost(host, port);
     final TaskAttemptID firstTaskid = TaskAttemptID.forName(args[2]);
-    int jvmIdInt = Integer.parseInt(args[3]);
+    long jvmIdLong = Long.parseLong(args[3]);
     JVMId jvmId = new JVMId(firstTaskid.getJobID(),
-        firstTaskid.getTaskType() == TaskType.MAP, jvmIdInt);
+        firstTaskid.getTaskType() == TaskType.MAP, jvmIdLong);
 
     // initialize metrics
     DefaultMetricsSystem.initialize(
@@ -165,6 +165,7 @@ class YarnChild {
         @Override
         public Object run() throws Exception {
           // use job-specified working directory
+          setEncryptedSpillKeyIfRequired(taskFinal);
           FileSystem.get(job).setWorkingDirectory(job.getWorkingDirectory());
           taskFinal.run(job, umbilical); // run the task
           return null;
@@ -220,6 +221,23 @@ class YarnChild {
       RPC.stopProxy(umbilical);
       DefaultMetricsSystem.shutdown();
       TaskLog.syncLogsShutdown(logSyncer);
+    }
+  }
+
+  /**
+   * Utility method to check if the Encrypted Spill Key needs to be set into the
+   * user credentials of the user running the Map / Reduce Task
+   * @param task The Map / Reduce task to set the Encrypted Spill information in
+   * @throws Exception
+   */
+  public static void setEncryptedSpillKeyIfRequired(Task task) throws
+          Exception {
+    if ((task != null) && (task.getEncryptedSpillKey() != null) && (task
+            .getEncryptedSpillKey().length > 1)) {
+      Credentials creds =
+              UserGroupInformation.getCurrentUser().getCredentials();
+      TokenCache.setEncryptedSpillKey(task.getEncryptedSpillKey(), creds);
+      UserGroupInformation.getCurrentUser().addCredentials(creds);
     }
   }
 

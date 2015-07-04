@@ -22,7 +22,6 @@ import static org.apache.hadoop.metrics2.impl.MsInfo.SessionId;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
@@ -32,6 +31,8 @@ import org.apache.hadoop.metrics2.lib.MutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  *
@@ -50,7 +51,11 @@ import org.apache.hadoop.metrics2.source.JvmMetrics;
 public class DataNodeMetrics {
 
   @Metric MutableCounterLong bytesWritten;
+  @Metric("Milliseconds spent writing")
+  MutableCounterLong totalWriteTime;
   @Metric MutableCounterLong bytesRead;
+  @Metric("Milliseconds spent reading")
+  MutableCounterLong totalReadTime;
   @Metric MutableCounterLong blocksWritten;
   @Metric MutableCounterLong blocksRead;
   @Metric MutableCounterLong blocksReplicated;
@@ -64,10 +69,37 @@ public class DataNodeMetrics {
   @Metric MutableCounterLong writesFromLocalClient;
   @Metric MutableCounterLong writesFromRemoteClient;
   @Metric MutableCounterLong blocksGetLocalPathInfo;
+  @Metric("Bytes read by remote client")
+  MutableCounterLong remoteBytesRead;
+  @Metric("Bytes written by remote client")
+  MutableCounterLong remoteBytesWritten;
+
+  // RamDisk metrics on read/write
+  @Metric MutableCounterLong ramDiskBlocksWrite;
+  @Metric MutableCounterLong ramDiskBlocksWriteFallback;
+  @Metric MutableCounterLong ramDiskBytesWrite;
+  @Metric MutableCounterLong ramDiskBlocksReadHits;
+
+  // RamDisk metrics on eviction
+  @Metric MutableCounterLong ramDiskBlocksEvicted;
+  @Metric MutableCounterLong ramDiskBlocksEvictedWithoutRead;
+  @Metric MutableRate        ramDiskBlocksEvictionWindowMs;
+  final MutableQuantiles[]   ramDiskBlocksEvictionWindowMsQuantiles;
+
+
+  // RamDisk metrics on lazy persist
+  @Metric MutableCounterLong ramDiskBlocksLazyPersisted;
+  @Metric MutableCounterLong ramDiskBlocksDeletedBeforeLazyPersisted;
+  @Metric MutableCounterLong ramDiskBytesLazyPersisted;
+  @Metric MutableRate        ramDiskBlocksLazyPersistWindowMs;
+  final MutableQuantiles[]   ramDiskBlocksLazyPersistWindowMsQuantiles;
 
   @Metric MutableCounterLong fsyncCount;
   
   @Metric MutableCounterLong volumeFailures;
+
+  @Metric("Count of network errors on the datanode")
+  MutableCounterLong datanodeNetworkErrors;
 
   @Metric MutableRate readBlockOp;
   @Metric MutableRate writeBlockOp;
@@ -76,6 +108,7 @@ public class DataNodeMetrics {
   @Metric MutableRate replaceBlockOp;
   @Metric MutableRate heartbeats;
   @Metric MutableRate blockReports;
+  @Metric MutableRate incrementalBlockReports;
   @Metric MutableRate cacheReports;
   @Metric MutableRate packetAckRoundTripTimeNanos;
   final MutableQuantiles[] packetAckRoundTripTimeNanosQuantiles;
@@ -107,6 +140,8 @@ public class DataNodeMetrics {
     fsyncNanosQuantiles = new MutableQuantiles[len];
     sendDataPacketBlockedOnNetworkNanosQuantiles = new MutableQuantiles[len];
     sendDataPacketTransferNanosQuantiles = new MutableQuantiles[len];
+    ramDiskBlocksEvictionWindowMsQuantiles = new MutableQuantiles[len];
+    ramDiskBlocksLazyPersistWindowMsQuantiles = new MutableQuantiles[len];
     
     for (int i = 0; i < len; i++) {
       int interval = intervals[i];
@@ -127,6 +162,14 @@ public class DataNodeMetrics {
           "sendDataPacketTransferNanos" + interval + "s", 
           "Time reading from disk and writing to network while sending " +
           "a packet in ns", "ops", "latency", interval);
+      ramDiskBlocksEvictionWindowMsQuantiles[i] = registry.newQuantiles(
+          "ramDiskBlocksEvictionWindows" + interval + "s",
+          "Time between the RamDisk block write and eviction in ms",
+          "ops", "latency", interval);
+      ramDiskBlocksLazyPersistWindowMsQuantiles[i] = registry.newQuantiles(
+          "ramDiskBlocksLazyPersistWindows" + interval + "s",
+          "Time between the RamDisk block write and disk persist in ms",
+          "ops", "latency", interval);
     }
   }
 
@@ -135,7 +178,7 @@ public class DataNodeMetrics {
     MetricsSystem ms = DefaultMetricsSystem.instance();
     JvmMetrics jm = JvmMetrics.create("DataNode", sessionId, ms);
     String name = "DataNodeActivity-"+ (dnName.isEmpty()
-        ? "UndefinedDataNodeName"+ DFSUtil.getRandom().nextInt() 
+        ? "UndefinedDataNodeName"+ ThreadLocalRandom.current().nextInt()
             : dnName.replace(':', '-'));
 
     // Percentile measurement is off by default, by watching no intervals
@@ -160,12 +203,16 @@ public class DataNodeMetrics {
     blockReports.add(latency);
   }
 
+  public void addIncrementalBlockReport(long latency) {
+    incrementalBlockReports.add(latency);
+  }
+
   public void addCacheReport(long latency) {
     cacheReports.add(latency);
   }
 
-  public void incrBlocksReplicated(int delta) {
-    blocksReplicated.incr(delta);
+  public void incrBlocksReplicated() {
+    blocksReplicated.incr();
   }
 
   public void incrBlocksWritten() {
@@ -229,6 +276,15 @@ public class DataNodeMetrics {
     fsyncCount.incr();
   }
 
+  public void incrTotalWriteTime(long timeTaken) {
+    totalWriteTime.incr(timeTaken);
+  }
+
+  public void incrTotalReadTime(long timeTaken) {
+    totalReadTime.incr(timeTaken);
+  }
+
+
   public void addPacketAckRoundTripTimeNanos(long latencyNanos) {
     packetAckRoundTripTimeNanos.add(latencyNanos);
     for (MutableQuantiles q : packetAckRoundTripTimeNanosQuantiles) {
@@ -254,16 +310,31 @@ public class DataNodeMetrics {
     DefaultMetricsSystem.shutdown();
   }
 
-  public void incrWritesFromClient(boolean local) {
-    (local ? writesFromLocalClient : writesFromRemoteClient).incr();
+  public void incrWritesFromClient(boolean local, long size) {
+    if(local) {
+      writesFromLocalClient.incr();
+    } else {
+      writesFromRemoteClient.incr();
+      remoteBytesWritten.incr(size);
+    }
   }
 
-  public void incrReadsFromClient(boolean local) {
-    (local ? readsFromLocalClient : readsFromRemoteClient).incr();
+  public void incrReadsFromClient(boolean local, long size) {
+
+    if (local) {
+      readsFromLocalClient.incr();
+    } else {
+      readsFromRemoteClient.incr();
+      remoteBytesRead.incr(size);
+    }
   }
   
   public void incrVolumeFailures() {
     volumeFailures.incr();
+  }
+
+  public void incrDatanodeNetworkErrors() {
+    datanodeNetworkErrors.incr();
   }
 
   /** Increment for getBlockLocalPathInfo calls */
@@ -282,6 +353,56 @@ public class DataNodeMetrics {
     sendDataPacketTransferNanos.add(latencyNanos);
     for (MutableQuantiles q : sendDataPacketTransferNanosQuantiles) {
       q.add(latencyNanos);
+    }
+  }
+
+  public void incrRamDiskBlocksWrite() {
+    ramDiskBlocksWrite.incr();
+  }
+
+  public void incrRamDiskBlocksWriteFallback() {
+    ramDiskBlocksWriteFallback.incr();
+  }
+
+  public void addRamDiskBytesWrite(long bytes) {
+    ramDiskBytesWrite.incr(bytes);
+  }
+
+  public void incrRamDiskBlocksReadHits() {
+    ramDiskBlocksReadHits.incr();
+  }
+
+  public void incrRamDiskBlocksEvicted() {
+    ramDiskBlocksEvicted.incr();
+  }
+
+  public void incrRamDiskBlocksEvictedWithoutRead() {
+    ramDiskBlocksEvictedWithoutRead.incr();
+  }
+
+  public void addRamDiskBlocksEvictionWindowMs(long latencyMs) {
+    ramDiskBlocksEvictionWindowMs.add(latencyMs);
+    for (MutableQuantiles q : ramDiskBlocksEvictionWindowMsQuantiles) {
+      q.add(latencyMs);
+    }
+  }
+
+  public void incrRamDiskBlocksLazyPersisted() {
+    ramDiskBlocksLazyPersisted.incr();
+  }
+
+  public void incrRamDiskBlocksDeletedBeforeLazyPersisted() {
+    ramDiskBlocksDeletedBeforeLazyPersisted.incr();
+  }
+
+  public void incrRamDiskBytesLazyPersisted(long bytes) {
+    ramDiskBytesLazyPersisted.incr(bytes);
+  }
+
+  public void addRamDiskBlocksLazyPersistWindowMs(long latencyMs) {
+    ramDiskBlocksLazyPersistWindowMs.add(latencyMs);
+    for (MutableQuantiles q : ramDiskBlocksLazyPersistWindowMsQuantiles) {
+      q.add(latencyMs);
     }
   }
 }

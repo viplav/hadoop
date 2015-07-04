@@ -25,7 +25,7 @@
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-mapreduce-client-nativetask</artifactId>
   <version>3.0.0-SNAPSHOT</version>
-  <name>hadoop-mapreduce-client-nativetask</name>
+  <name>Apache Hadoop MapReduce NativeTask</name>
 
   <properties>
     <!-- Needed for generating FindBugs warnings using parent pom -->
@@ -172,8 +172,6 @@
                   <target>
                     <copy file="${basedir}/../../../hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4.h"
                       todir="${project.build.directory}/native/" />
-                    <copy file="${basedir}/../../../hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4_encoder.h"
-                      todir="${project.build.directory}/native/" />
                     <copy file="${basedir}/../../../hadoop-common-project/hadoop-common/src/main/native/src/org/apache/hadoop/io/compress/lz4/lz4.c"
                       todir="${project.build.directory}/native/" />
                     <copy todir="${project.build.directory}/native/test/testData"
@@ -199,7 +197,7 @@
                 <goals><goal>run</goal></goals>
                 <configuration>
                   <target>
-                    <exec executable="sh" failonerror="true" dir="${project.build.directory}/native/test">
+                    <exec executable="${shell-executable}" failonerror="true" dir="${project.build.directory}/native/test">
                       <arg value="-c"/>
                       <arg value="[ x$SKIPTESTS = xtrue ] || sh test.sh"/>
                       <env key="SKIPTESTS" value="${skipTests}"/>

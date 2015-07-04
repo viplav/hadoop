@@ -20,12 +20,15 @@ package org.apache.hadoop.util;
 
 import java.io.File;
 import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -45,18 +48,12 @@ public class ApplicationClassLoader extends URLClassLoader {
    * classes are considered system classes, and are not loaded by the
    * application classloader.
    */
-  public static final String DEFAULT_SYSTEM_CLASSES =
-        "java.," +
-        "javax.," +
-        "org.w3c.dom.," +
-        "org.xml.sax.," +
-        "org.apache.commons.logging.," +
-        "org.apache.log4j.," +
-        "org.apache.hadoop.," +
-        "core-default.xml," +
-        "hdfs-default.xml," +
-        "mapred-default.xml," +
-        "yarn-default.xml";
+  public static final String SYSTEM_CLASSES_DEFAULT;
+
+  private static final String PROPERTIES_FILE =
+      "org.apache.hadoop.application-classloader.properties";
+  private static final String SYSTEM_CLASSES_DEFAULT_KEY =
+      "system.classes.default";
 
   private static final Log LOG =
     LogFactory.getLog(ApplicationClassLoader.class.getName());
@@ -68,6 +65,28 @@ public class ApplicationClassLoader extends URLClassLoader {
         return name.endsWith(".jar") || name.endsWith(".JAR");
       }
   };
+
+  static {
+    try (InputStream is = ApplicationClassLoader.class.getClassLoader()
+        .getResourceAsStream(PROPERTIES_FILE);) {
+      if (is == null) {
+        throw new ExceptionInInitializerError("properties file " +
+            PROPERTIES_FILE + " is not found");
+      }
+      Properties props = new Properties();
+      props.load(is);
+      // get the system classes default
+      String systemClassesDefault =
+          props.getProperty(SYSTEM_CLASSES_DEFAULT_KEY);
+      if (systemClassesDefault == null) {
+        throw new ExceptionInInitializerError("property " +
+            SYSTEM_CLASSES_DEFAULT_KEY + " is not found");
+      }
+      SYSTEM_CLASSES_DEFAULT = systemClassesDefault;
+    } catch (IOException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
 
   private final ClassLoader parent;
   private final List<String> systemClasses;
@@ -85,7 +104,7 @@ public class ApplicationClassLoader extends URLClassLoader {
     }
     // if the caller-specified system classes are null or empty, use the default
     this.systemClasses = (systemClasses == null || systemClasses.isEmpty()) ?
-        Arrays.asList(StringUtils.getTrimmedStrings(DEFAULT_SYSTEM_CLASSES)) :
+        Arrays.asList(StringUtils.getTrimmedStrings(SYSTEM_CLASSES_DEFAULT)) :
         systemClasses;
     LOG.info("system classes: " + this.systemClasses);
   }
@@ -195,25 +214,43 @@ public class ApplicationClassLoader extends URLClassLoader {
     return c;
   }
 
+  /**
+   * Checks if a class should be included as a system class.
+   *
+   * A class is a system class if and only if it matches one of the positive
+   * patterns and none of the negative ones.
+   *
+   * @param name the class name to check
+   * @param systemClasses a list of system class configurations.
+   * @return true if the class is a system class
+   */
   public static boolean isSystemClass(String name, List<String> systemClasses) {
+    boolean result = false;
     if (systemClasses != null) {
       String canonicalName = name.replace('/', '.');
       while (canonicalName.startsWith(".")) {
         canonicalName=canonicalName.substring(1);
       }
       for (String c : systemClasses) {
-        boolean result = true;
+        boolean shouldInclude = true;
         if (c.startsWith("-")) {
           c = c.substring(1);
-          result = false;
+          shouldInclude = false;
         }
-        if (c.endsWith(".") && canonicalName.startsWith(c)) {
-          return result;
-        } else if (canonicalName.equals(c)) {
-          return result;
+        if (canonicalName.startsWith(c)) {
+          if (   c.endsWith(".")                                   // package
+              || canonicalName.length() == c.length()              // class
+              ||    canonicalName.length() > c.length()            // nested
+                 && canonicalName.charAt(c.length()) == '$' ) {
+            if (shouldInclude) {
+              result = true;
+            } else {
+              return false;
+            }
+          }
         }
       }
     }
-    return false;
+    return result;
   }
 }

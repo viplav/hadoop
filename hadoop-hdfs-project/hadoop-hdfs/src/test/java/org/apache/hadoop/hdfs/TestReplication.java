@@ -44,6 +44,7 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.server.datanode.SimulatedFSDataset;
 import org.apache.hadoop.util.Time;
 import org.junit.Test;
@@ -136,11 +137,8 @@ public class TestReplication {
     assertTrue(!fileSys.exists(name));
   }
 
-  /* 
-   * Test if Datanode reports bad blocks during replication request
-   */
-  @Test
-  public void testBadBlockReportOnTransfer() throws Exception {
+  private void testBadBlockReportOnTransfer(
+      boolean corruptBlockByDeletingBlockFile) throws Exception {
     Configuration conf = new HdfsConfiguration();
     FileSystem fs = null;
     DFSClient dfsClient = null;
@@ -161,7 +159,11 @@ public class TestReplication {
     // Corrupt the block belonging to the created file
     ExtendedBlock block = DFSTestUtil.getFirstBlock(fs, file1);
 
-    int blockFilesCorrupted = cluster.corruptBlockOnDataNodes(block);
+    int blockFilesCorrupted =
+        corruptBlockByDeletingBlockFile?
+            cluster.corruptBlockOnDataNodesByDeletingBlockFile(block) :
+              cluster.corruptBlockOnDataNodes(block);       
+
     assertEquals("Corrupted too few blocks", replFactor, blockFilesCorrupted); 
 
     // Increase replication factor, this should invoke transfer request
@@ -185,7 +187,24 @@ public class TestReplication {
     assertTrue(replicaCount == 1);
     cluster.shutdown();
   }
-  
+
+  /* 
+   * Test if Datanode reports bad blocks during replication request
+   */
+  @Test
+  public void testBadBlockReportOnTransfer() throws Exception {
+    testBadBlockReportOnTransfer(false);
+  }
+
+  /* 
+   * Test if Datanode reports bad blocks during replication request
+   * with missing block file
+   */
+  @Test
+  public void testBadBlockReportOnTransferMissingBlockFile() throws Exception {
+    testBadBlockReportOnTransfer(true);
+  }
+
   /**
    * Tests replication in DFS.
    */
@@ -253,7 +272,7 @@ public class TestReplication {
                                        ClientProtocol namenode,
                                        int expected, long maxWaitSec) 
                                        throws IOException {
-    long start = Time.now();
+    long start = Time.monotonicNow();
     
     //wait for all the blocks to be replicated;
     LOG.info("Checking for block replication for " + filename);
@@ -279,7 +298,7 @@ public class TestReplication {
       }
       
       if (maxWaitSec > 0 && 
-          (Time.now() - start) > (maxWaitSec * 1000)) {
+          (Time.monotonicNow() - start) > (maxWaitSec * 1000)) {
         throw new IOException("Timedout while waiting for all blocks to " +
                               " be replicated for " + filename);
       }
@@ -331,7 +350,6 @@ public class TestReplication {
           0, Long.MAX_VALUE).get(0).getBlock();
       
       cluster.shutdown();
-      cluster = null;
       
       for (int i=0; i<25; i++) {
         buffer[i] = '0';
@@ -340,7 +358,7 @@ public class TestReplication {
       int fileCount = 0;
       // Choose 3 copies of block file - delete 1 and corrupt the remaining 2
       for (int dnIndex=0; dnIndex<3; dnIndex++) {
-        File blockFile = MiniDFSCluster.getBlockFile(dnIndex, block);
+        File blockFile = cluster.getBlockFile(dnIndex, block);
         LOG.info("Checking for file " + blockFile);
         
         if (blockFile != null && blockFile.exists()) {
@@ -427,7 +445,7 @@ public class TestReplication {
 
     // Change the length of a replica
     for (int i=0; i<cluster.getDataNodes().size(); i++) {
-      if (TestDatanodeBlockScanner.changeReplicaLength(block, i, lenDelta)) {
+      if (DFSTestUtil.changeReplicaLength(cluster, block, i, lenDelta)) {
         break;
       }
     }
@@ -494,7 +512,7 @@ public class TestReplication {
       String blockFile = null;
       File[] listFiles = participatedNodeDirs.listFiles();
       for (File file : listFiles) {
-        if (file.getName().startsWith("blk_")
+        if (file.getName().startsWith(Block.BLOCK_FILE_PREFIX)
             && !file.getName().endsWith("meta")) {
           blockFile = file.getName();
           for (File file1 : nonParticipatedNodeDirs) {

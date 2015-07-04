@@ -21,12 +21,16 @@ package org.apache.hadoop.mapreduce.v2.hs.server;
 import static org.junit.Assert.*;
 
 import java.io.IOException;
+import java.security.PrivilegedAction;
+import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.v2.hs.JobHistory;
@@ -39,6 +43,13 @@ import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
+
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
@@ -46,7 +57,9 @@ import static org.mockito.Mockito.verify;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogDeletionService;
 
+@RunWith(Parameterized.class)
 public class TestHSAdminServer {
+  private boolean securityEnabled = true;
   private HSAdminServer hsAdminServer = null;
   private HSAdmin hsAdminClient = null;
   JobConf conf = null;
@@ -80,6 +93,15 @@ public class TestHSAdminServer {
     }
   }
 
+  @Parameters
+  public static Collection<Object[]> testParameters() {
+    return Arrays.asList(new Object[][] { { false }, { true } });
+  }
+
+  public TestHSAdminServer(boolean enableSecurity) {
+    securityEnabled = enableSecurity;
+  }
+
   @Before
   public void init() throws HadoopIllegalArgumentException, IOException {
     conf = new JobConf();
@@ -87,6 +109,9 @@ public class TestHSAdminServer {
     conf.setClass("hadoop.security.group.mapping", MockUnixGroupsMapping.class,
         GroupMappingServiceProvider.class);
     conf.setLong("hadoop.security.groups.cache.secs", groupRefreshTimeoutSec);
+    conf.setBoolean(
+          CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION,
+          securityEnabled);
     Groups.getUserToGroupsMappingService(conf);
     jobHistoryService = mock(JobHistory.class);
     alds = mock(AggregatedLogDeletionService.class);
@@ -263,6 +288,56 @@ public class TestHSAdminServer {
     String[] args = new String[1];
     args[0] = "-refreshJobRetentionSettings";
     hsAdminClient.run(args);
+    verify(jobHistoryService).refreshJobRetentionSettings();
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testUGIForLogAndJobRefresh() throws Exception {
+    UserGroupInformation ugi =
+        UserGroupInformation.createUserForTesting("test", new String[] {"grp"});
+    UserGroupInformation loginUGI = spy(hsAdminServer.getLoginUGI());
+    hsAdminServer.setLoginUGI(loginUGI);
+
+    // Run refresh log retention settings with test user
+    ugi.doAs(new PrivilegedAction<Void>() {
+      @Override
+      public Void run() {
+        String[] args = new String[1];
+        args[0] = "-refreshLogRetentionSettings";
+        try {
+          hsAdminClient.run(args);
+        } catch (Exception e) {
+          fail("refreshLogRetentionSettings should have been successful");
+        }
+        return null;
+      }
+    });
+    // Verify if AggregatedLogDeletionService#refreshLogRetentionSettings was
+    // called with login UGI, instead of the UGI command was run with.
+    verify(loginUGI).doAs(any(PrivilegedExceptionAction.class));
+    verify(alds).refreshLogRetentionSettings();
+
+    // Reset for refresh job retention settings
+    reset(loginUGI);
+
+    // Run refresh job retention settings with test user
+    ugi.doAs(new PrivilegedAction<Void>() {
+      @Override
+      public Void run() {
+        String[] args = new String[1];
+        args[0] = "-refreshJobRetentionSettings";
+        try {
+          hsAdminClient.run(args);
+        } catch (Exception e) {
+          fail("refreshJobRetentionSettings should have been successful");
+        }
+        return null;
+      }
+    });
+    // Verify if JobHistory#refreshJobRetentionSettings was called with
+    // login UGI, instead of the UGI command was run with.
+    verify(loginUGI).doAs(any(PrivilegedExceptionAction.class));
     verify(jobHistoryService).refreshJobRetentionSettings();
   }
 

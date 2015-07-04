@@ -32,18 +32,6 @@ import org.apache.hadoop.util.Shell;
 @InterfaceAudience.LimitedPrivate({"YARN", "MAPREDUCE"})
 @InterfaceStability.Unstable
 public abstract class ResourceCalculatorPlugin extends Configured {
-  
-  protected String processPid = null;
-
-  /**
-   * set the pid of the process for which <code>getProcResourceValues</code>
-   * will be invoked
-   * 
-   * @param pid
-   */
-  public void setProcessPid(String pid) {
-    processPid = pid;
-  }
 
   /**
    * Obtain the total size of the virtual memory present in the system.
@@ -76,11 +64,18 @@ public abstract class ResourceCalculatorPlugin extends Configured {
   public abstract long getAvailablePhysicalMemorySize();
 
   /**
-   * Obtain the total number of processors present on the system.
+   * Obtain the total number of logical processors present on the system.
    *
-   * @return number of processors
+   * @return number of logical processors
    */
   public abstract int getNumProcessors();
+
+  /**
+   * Obtain total number of physical cores present on the system.
+   *
+   * @return number of physical cores
+   */
+  public abstract int getNumCores();
 
   /**
    * Obtain the CPU frequency of on the system.

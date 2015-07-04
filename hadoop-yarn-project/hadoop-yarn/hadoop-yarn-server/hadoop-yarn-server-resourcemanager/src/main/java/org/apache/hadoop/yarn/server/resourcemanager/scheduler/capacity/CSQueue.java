@@ -35,6 +35,8 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
 
@@ -72,7 +74,7 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
   
   /**
    * Get the configured <em>capacity</em> of the queue.
-   * @return queue capacity
+   * @return configured queue capacity
    */
   public float getCapacity();
 
@@ -106,28 +108,31 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
   public float getAbsoluteUsedCapacity();
 
   /**
-   * Get the current used capacity of the queue
-   * and it's children (if any).
-   * @return queue used capacity
-   */
-  public float getUsedCapacity();
-  
-  /**
    * Set used capacity of the queue.
-   * @param usedCapacity used capacity of the queue
+   * @param usedCapacity
+   *          used capacity of the queue
    */
   public void setUsedCapacity(float usedCapacity);
-  
+
   /**
    * Set absolute used capacity of the queue.
-   * @param absUsedCapacity absolute used capacity of the queue
+   * @param absUsedCapacity
+   *          absolute used capacity of the queue
    */
   public void setAbsoluteUsedCapacity(float absUsedCapacity);
 
   /**
-   * Get the currently utilized resources in the cluster 
-   * by the queue and children (if any).
-   * @return used resources by the queue and it's children 
+   * Get the current used capacity of nodes without label(s) of the queue
+   * and it's children (if any).
+   * @return queue used capacity
+   */
+  public float getUsedCapacity();
+
+  /**
+   * Get the currently utilized resources which allocated at nodes without any
+   * labels in the cluster by the queue and children (if any).
+   * 
+   * @return used resources by the queue and it's children
    */
   public Resource getUsedResources();
   
@@ -184,10 +189,14 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
    * Assign containers to applications in the queue or it's children (if any).
    * @param clusterResource the resource of the cluster.
    * @param node node on which resources are available
+   * @param resourceLimits how much overall resource of this queue can use. 
+   * @param schedulingMode Type of exclusive check when assign container on a 
+   * NodeManager, see {@link SchedulingMode}.
    * @return the assignment
    */
-  public CSAssignment assignContainers(
-      Resource clusterResource, FiCaSchedulerNode node);
+  public CSAssignment assignContainers(Resource clusterResource,
+      FiCaSchedulerNode node, ResourceLimits resourceLimits,
+      SchedulingMode schedulingMode);
   
   /**
    * A container assigned to the queue has completed.
@@ -200,11 +209,13 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
    *                        container
    * @param childQueue <code>CSQueue</code> to reinsert in childQueues 
    * @param event event to be sent to the container
+   * @param sortQueues indicates whether it should re-sort the queues
    */
   public void completedContainer(Resource clusterResource,
       FiCaSchedulerApp application, FiCaSchedulerNode node, 
       RMContainer container, ContainerStatus containerStatus, 
-      RMContainerEventType event, CSQueue childQueue);
+      RMContainerEventType event, CSQueue childQueue,
+      boolean sortQueues);
 
   /**
    * Get the number of applications in the queue.
@@ -224,8 +235,10 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
    /**
    * Update the cluster resource for queues as we add/remove nodes
    * @param clusterResource the current cluster resource
+   * @param resourceLimits the current ResourceLimits
    */
-  public void updateClusterResource(Resource clusterResource);
+  public void updateClusterResource(Resource clusterResource,
+      ResourceLimits resourceLimits);
   
   /**
    * Get the {@link ActiveUsersManager} for the queue.
@@ -256,4 +269,22 @@ extends org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue {
    */
   public void attachContainer(Resource clusterResource,
                FiCaSchedulerApp application, RMContainer container);
+
+  /**
+   * Check whether <em>disable_preemption</em> property is set for this queue
+   * @return true if <em>disable_preemption</em> is set, false if not
+   */
+  public boolean getPreemptionDisabled();
+  
+  /**
+   * Get QueueCapacities of this queue
+   * @return queueCapacities
+   */
+  public QueueCapacities getQueueCapacities();
+  
+  /**
+   * Get ResourceUsage of this queue
+   * @return resourceUsage
+   */
+  public ResourceUsage getQueueResourceUsage();
 }

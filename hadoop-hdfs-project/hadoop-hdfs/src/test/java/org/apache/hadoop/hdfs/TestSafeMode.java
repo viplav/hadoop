@@ -52,6 +52,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -66,6 +67,7 @@ public class TestSafeMode {
   public static final Log LOG = LogFactory.getLog(TestSafeMode.class);
   private static final Path TEST_PATH = new Path("/test");
   private static final int BLOCK_SIZE = 1024;
+  private static final String NEWLINE = System.getProperty("line.separator");
   Configuration conf; 
   MiniDFSCluster cluster;
   FileSystem fs;
@@ -196,7 +198,7 @@ public class TestSafeMode {
     
     String status = nn.getNamesystem().getSafemode();
     assertEquals("Safe mode is ON. The reported blocks 0 needs additional " +
-        "15 blocks to reach the threshold 0.9990 of total blocks 15.\n" +
+        "14 blocks to reach the threshold 0.9990 of total blocks 15." + NEWLINE +
         "The number of live datanodes 0 has reached the minimum number 0. " +
         "Safe mode will be turned off automatically once the thresholds " +
         "have been reached.", status);
@@ -291,9 +293,13 @@ public class TestSafeMode {
     try {
       f.run(fs);
       fail(msg);
-     } catch (IOException ioe) {
-       assertTrue(ioe.getMessage().contains("safe mode"));
-     }
+    } catch (RemoteException re) {
+      assertEquals(SafeModeException.class.getName(), re.getClassName());
+      GenericTestUtils.assertExceptionContains("Name node is in safe mode", re);
+    } catch (SafeModeException ignored) {
+    } catch (IOException ioe) {
+      fail(msg + " " + StringUtils.stringifyException(ioe));
+    }
   }
 
   /**
@@ -338,6 +344,12 @@ public class TestSafeMode {
       @Override
       public void run(FileSystem fs) throws IOException {
         DFSTestUtil.appendFile(fs, file1, "new bytes");
+      }});
+
+    runFsFun("Truncate file while in SM", new FSRun() {
+      @Override
+      public void run(FileSystem fs) throws IOException {
+        fs.truncate(file1, 0);
       }});
 
     runFsFun("Delete file while in SM", new FSRun() {
@@ -448,9 +460,9 @@ public class TestSafeMode {
 
     String tipMsg = cluster.getNamesystem().getSafemode();
     assertTrue("Safemode tip message doesn't look right: " + tipMsg,
-               tipMsg.contains("The number of live datanodes 0 needs an additional " +
-                               "1 live datanodes to reach the minimum number 1.\n" +
-                               "Safe mode will be turned off automatically"));
+      tipMsg.contains("The number of live datanodes 0 needs an additional " +
+                      "1 live datanodes to reach the minimum number 1." +
+                      NEWLINE + "Safe mode will be turned off automatically"));
 
     // Start a datanode
     cluster.startDataNodes(conf, 1, true, null, null);

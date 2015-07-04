@@ -28,8 +28,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -42,12 +40,12 @@ import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.security.client.TimelineDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.metrics.AppAttemptMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.metrics.ContainerMetricsConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.RMServerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
@@ -65,13 +63,10 @@ public class SystemMetricsPublisher extends CompositeService {
 
   private static final Log LOG = LogFactory
       .getLog(SystemMetricsPublisher.class);
-  private static final int MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS = 10;
 
   private Dispatcher dispatcher;
   private TimelineClient client;
   private boolean publishSystemMetrics;
-  private int getTimelineDelegtionTokenAttempts = 0;
-  private boolean hasReceivedTimelineDelegtionToken = false;
 
   public SystemMetricsPublisher() {
     super(SystemMetricsPublisher.class.getName());
@@ -111,7 +106,7 @@ public class SystemMetricsPublisher extends CompositeService {
               app.getUser(),
               app.getQueue(),
               app.getSubmitTime(),
-              createdTime));
+              createdTime, app.getApplicationTags()));
     }
   }
 
@@ -126,7 +121,8 @@ public class SystemMetricsPublisher extends CompositeService {
               RMServerUtils.createApplicationState(state),
               app.getCurrentAppAttempt() == null ?
                   null : app.getCurrentAppAttempt().getAppAttemptId(),
-              finishedTime));
+              finishedTime,
+              app.getRMAppMetrics()));
     }
   }
 
@@ -137,7 +133,7 @@ public class SystemMetricsPublisher extends CompositeService {
       dispatcher.getEventHandler().handle(
           new ApplicationACLsUpdatedEvent(
               app.getApplicationId(),
-              appViewACLs,
+              appViewACLs == null ? "" : appViewACLs,
               updatedTime));
     }
   }
@@ -185,7 +181,7 @@ public class SystemMetricsPublisher extends CompositeService {
               container.getAllocatedResource(),
               container.getAllocatedNode(),
               container.getAllocatedPriority(),
-              createdTime));
+              createdTime, container.getNodeHttpAddress()));
     }
   }
 
@@ -255,6 +251,8 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getQueue());
     entityInfo.put(ApplicationMetricsConstants.SUBMITTED_TIME_ENTITY_INFO,
         event.getSubmittedTime());
+    entityInfo.put(ApplicationMetricsConstants.APP_TAGS_INFO,
+        event.getAppTags());
     entity.setOtherInfo(entityInfo);
     TimelineEvent tEvent = new TimelineEvent();
     tEvent.setEventType(
@@ -282,6 +280,12 @@ public class SystemMetricsPublisher extends CompositeService {
       eventInfo.put(ApplicationMetricsConstants.LATEST_APP_ATTEMPT_EVENT_INFO,
           event.getLatestApplicationAttemptId().toString());
     }
+    RMAppMetrics appMetrics = event.getAppMetrics();
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_CPU_METRICS,
+        appMetrics.getVcoreSeconds());
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_MEM_METRICS,
+        appMetrics.getMemorySeconds());
+    
     tEvent.setEventInfo(eventInfo);
     entity.addEvent(tEvent);
     putEntity(entity);
@@ -386,6 +390,9 @@ public class SystemMetricsPublisher extends CompositeService {
         event.getAllocatedNode().getPort());
     entityInfo.put(ContainerMetricsConstants.ALLOCATED_PRIORITY_ENTITY_INFO,
         event.getAllocatedPriority().getPriority());
+    entityInfo.put(
+      ContainerMetricsConstants.ALLOCATED_HOST_HTTP_ADDRESS_ENTITY_INFO,
+      event.getNodeHttpAddress());
     entity.setOtherInfo(entityInfo);
     TimelineEvent tEvent = new TimelineEvent();
     tEvent.setEventType(ContainerMetricsConstants.CREATED_EVENT_TYPE);
@@ -423,27 +430,6 @@ public class SystemMetricsPublisher extends CompositeService {
   }
 
   private void putEntity(TimelineEntity entity) {
-    if (UserGroupInformation.isSecurityEnabled()) {
-      if (!hasReceivedTimelineDelegtionToken
-          && getTimelineDelegtionTokenAttempts < MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS) {
-        try {
-          Token<TimelineDelegationTokenIdentifier> token =
-              client.getDelegationToken(
-                  UserGroupInformation.getCurrentUser().getUserName());
-          UserGroupInformation.getCurrentUser().addToken(token);
-          hasReceivedTimelineDelegtionToken = true;
-        } catch (Exception e) {
-          LOG.error("Error happens when getting timeline delegation token", e);
-        } finally {
-          ++getTimelineDelegtionTokenAttempts;
-          if (!hasReceivedTimelineDelegtionToken
-              && getTimelineDelegtionTokenAttempts == MAX_GET_TIMELINE_DELEGATION_TOKEN_ATTEMPTS) {
-            LOG.error("Run out of the attempts to get timeline delegation token. " +
-              "Use kerberos authentication only.");
-          }
-        }
-      }
-    }
     try {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Publishing the entity " + entity.getEntityId() +

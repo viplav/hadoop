@@ -17,25 +17,6 @@
  */
 package org.apache.hadoop.security.token.delegation.web;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.io.Text;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.authentication.client.AuthenticationException;
-import org.apache.hadoop.security.authentication.server.AuthenticationHandler;
-import org.apache.hadoop.security.authentication.server.AuthenticationToken;
-import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
-import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
-import org.apache.hadoop.util.HttpExceptionUtils;
-import org.codehaus.jackson.map.ObjectMapper;
-
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-import javax.ws.rs.core.MediaType;
 import java.io.IOException;
 import java.io.Writer;
 import java.text.MessageFormat;
@@ -45,6 +26,31 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.core.MediaType;
+
+import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authentication.client.AuthenticationException;
+import org.apache.hadoop.security.authentication.server.AuthenticationHandler;
+import org.apache.hadoop.security.authentication.server.AuthenticationToken;
+import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
+import org.apache.hadoop.security.authorize.AuthorizationException;
+import org.apache.hadoop.security.authorize.ProxyUsers;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier;
+import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
+import org.apache.hadoop.util.HttpExceptionUtils;
+import org.apache.hadoop.util.StringUtils;
+import org.codehaus.jackson.map.ObjectMapper;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * An {@link AuthenticationHandler} that implements Kerberos SPNEGO mechanism
@@ -80,7 +86,7 @@ public abstract class DelegationTokenAuthenticationHandler
 
   private static final Set<String> DELEGATION_TOKEN_OPS = new HashSet<String>();
 
-  static final String DELEGATION_TOKEN_UGI_ATTRIBUTE =
+  public static final String DELEGATION_TOKEN_UGI_ATTRIBUTE =
       "hadoop.security.delegation-token.ugi";
 
   static {
@@ -164,7 +170,7 @@ public abstract class DelegationTokenAuthenticationHandler
     boolean requestContinues = true;
     String op = ServletUtils.getParameter(request,
         KerberosDelegationTokenAuthenticator.OP_PARAM);
-    op = (op != null) ? op.toUpperCase() : null;
+    op = (op != null) ? StringUtils.toUpperCase(op) : null;
     if (DELEGATION_TOKEN_OPS.contains(op) &&
         !request.getMethod().equals("OPTIONS")) {
       KerberosDelegationTokenAuthenticator.DelegationTokenOperation dtOp =
@@ -187,6 +193,19 @@ public abstract class DelegationTokenAuthenticationHandler
           UserGroupInformation requestUgi = (token != null)
               ? UserGroupInformation.createRemoteUser(token.getUserName())
               : null;
+          // Create the proxy user if doAsUser exists
+          String doAsUser = DelegationTokenAuthenticationFilter.getDoAs(request);
+          if (requestUgi != null && doAsUser != null) {
+            requestUgi = UserGroupInformation.createProxyUser(
+                doAsUser, requestUgi);
+            try {
+              ProxyUsers.authorize(requestUgi, request.getRemoteAddr());
+            } catch (AuthorizationException ex) {
+              HttpExceptionUtils.createServletExceptionResponse(response,
+                  HttpServletResponse.SC_FORBIDDEN, ex);
+              return false;
+            }
+          }
           Map map = null;
           switch (dtOp) {
             case GETDELEGATIONTOKEN:
@@ -216,8 +235,7 @@ public abstract class DelegationTokenAuthenticationHandler
                 );
                 requestContinues = false;
               } else {
-                Token<DelegationTokenIdentifier> dt =
-                    new Token<DelegationTokenIdentifier>();
+                Token<AbstractDelegationTokenIdentifier> dt = new Token();
                 try {
                   dt.decodeFromUrlString(tokenToRenew);
                   long expirationTime = tokenManager.renewToken(dt,
@@ -240,8 +258,7 @@ public abstract class DelegationTokenAuthenticationHandler
                 );
                 requestContinues = false;
               } else {
-                Token<DelegationTokenIdentifier> dt =
-                    new Token<DelegationTokenIdentifier>();
+                Token<AbstractDelegationTokenIdentifier> dt = new Token();
                 try {
                   dt.decodeFromUrlString(tokenToCancel);
                   tokenManager.cancelToken(dt, (requestUgi != null)
@@ -303,6 +320,7 @@ public abstract class DelegationTokenAuthenticationHandler
    * @throws IOException thrown if an IO error occurred.
    * @throws AuthenticationException thrown if the authentication failed.
    */
+  @SuppressWarnings("unchecked")
   @Override
   public AuthenticationToken authenticate(HttpServletRequest request,
       HttpServletResponse response)
@@ -311,8 +329,7 @@ public abstract class DelegationTokenAuthenticationHandler
     String delegationParam = getDelegationToken(request);
     if (delegationParam != null) {
       try {
-        Token<DelegationTokenIdentifier> dt =
-            new Token<DelegationTokenIdentifier>();
+        Token<AbstractDelegationTokenIdentifier> dt = new Token();
         dt.decodeFromUrlString(delegationParam);
         UserGroupInformation ugi = tokenManager.verifyToken(dt);
         final String shortName = ugi.getShortUserName();

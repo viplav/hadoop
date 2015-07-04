@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.api.records;
 
 import java.util.List;
+import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
@@ -28,19 +29,18 @@ import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p>QueueInfo is a report of the runtime information of the queue.</p>
- * 
- * <p>It includes information such as:
- *   <ul>
- *     <li>Queue name.</li>
- *     <li>Capacity of the queue.</li>
- *     <li>Maximum capacity of the queue.</li>
- *     <li>Current capacity of the queue.</li>
- *     <li>Child queues.</li>
- *     <li>Running applications.</li>
- *     <li>{@link QueueState} of the queue.</li>
- *   </ul>
- * </p>
+ * QueueInfo is a report of the runtime information of the queue.
+ * <p>
+ * It includes information such as:
+ * <ul>
+ *   <li>Queue name.</li>
+ *   <li>Capacity of the queue.</li>
+ *   <li>Maximum capacity of the queue.</li>
+ *   <li>Current capacity of the queue.</li>
+ *   <li>Child queues.</li>
+ *   <li>Running applications.</li>
+ *   <li>{@link QueueState} of the queue.</li>
+ * </ul>
  *
  * @see QueueState
  * @see ApplicationClientProtocol#getQueueInfo(org.apache.hadoop.yarn.api.protocolrecords.GetQueueInfoRequest)
@@ -48,13 +48,14 @@ import org.apache.hadoop.yarn.util.Records;
 @Public
 @Stable
 public abstract class QueueInfo {
-
+  
   @Private
   @Unstable
   public static QueueInfo newInstance(String queueName, float capacity,
       float maximumCapacity, float currentCapacity,
       List<QueueInfo> childQueues, List<ApplicationReport> applications,
-      QueueState queueState) {
+      QueueState queueState, Set<String> accessibleNodeLabels,
+      String defaultNodeLabelExpression, QueueStatistics queueStatistics) {
     QueueInfo queueInfo = Records.newRecord(QueueInfo.class);
     queueInfo.setQueueName(queueName);
     queueInfo.setCapacity(capacity);
@@ -63,6 +64,9 @@ public abstract class QueueInfo {
     queueInfo.setChildQueues(childQueues);
     queueInfo.setApplications(applications);
     queueInfo.setQueueState(queueState);
+    queueInfo.setAccessibleNodeLabels(accessibleNodeLabels);
+    queueInfo.setDefaultNodeLabelExpression(defaultNodeLabelExpression);
+    queueInfo.setQueueStatistics(queueStatistics);
     return queueInfo;
   }
 
@@ -149,4 +153,56 @@ public abstract class QueueInfo {
   @Private
   @Unstable
   public abstract void setQueueState(QueueState queueState);
+  
+  /**
+   * Get the <code>accessible node labels</code> of the queue.
+   * @return <code>accessible node labels</code> of the queue
+   */
+  @Public
+  @Stable
+  public abstract Set<String> getAccessibleNodeLabels();
+  
+  /**
+   * Set the <code>accessible node labels</code> of the queue.
+   */
+  @Private
+  @Unstable
+  public abstract void setAccessibleNodeLabels(Set<String> labels);
+  
+  /**
+   * Get the <code>default node label expression</code> of the queue, this takes
+   * affect only when the <code>ApplicationSubmissionContext</code> and
+   * <code>ResourceRequest</code> don't specify their
+   * <code>NodeLabelExpression</code>.
+   * 
+   * @return <code>default node label expression</code> of the queue
+   */
+  @Public
+  @Stable
+  public abstract String getDefaultNodeLabelExpression();
+  
+  @Public
+  @Stable
+  public abstract void setDefaultNodeLabelExpression(
+      String defaultLabelExpression);
+
+  /**
+   * Get the <code>queue stats</code> for the queue
+   *
+   * @return <code>queue stats</code> of the queue
+   */
+  @Public
+  @Unstable
+  public abstract QueueStatistics getQueueStatistics();
+
+  /**
+   * Set the queue statistics for the queue
+   * 
+   * @param queueStatistics
+   *          the queue statistics
+   */
+  @Public
+  @Unstable
+  public abstract void setQueueStatistics(QueueStatistics queueStatistics);
+
 }

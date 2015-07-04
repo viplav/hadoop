@@ -22,15 +22,17 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystemContractBaseTest;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.s3native.NativeS3FileSystem.NativeS3FsInputStream;
+import org.junit.internal.AssumptionViolatedException;
 
 public abstract class NativeS3FileSystemContractBaseTest
   extends FileSystemContractBaseTest {
-  
+  public static final String KEY_TEST_FS = "test.fs.s3n.name";
   private NativeFileSystemStore store;
   
   abstract NativeFileSystemStore getNativeFileSystemStore() throws IOException;
@@ -40,7 +42,12 @@ public abstract class NativeS3FileSystemContractBaseTest
     Configuration conf = new Configuration();
     store = getNativeFileSystemStore();
     fs = new NativeS3FileSystem(store);
-    fs.initialize(URI.create(conf.get("test.fs.s3n.name")), conf);
+    String fsname = conf.get(KEY_TEST_FS);
+    if (StringUtils.isEmpty(fsname)) {
+      throw new AssumptionViolatedException(
+          "No test FS defined in :" + KEY_TEST_FS);
+    }
+    fs.initialize(URI.create(fsname), conf);
   }
   
   @Override
@@ -158,14 +165,15 @@ public abstract class NativeS3FileSystemContractBaseTest
   
   public void testRetryOnIoException() throws Exception {
     class TestInputStream extends InputStream {
-      boolean shouldThrow = false;
+      boolean shouldThrow = true;
       int throwCount = 0;
       int pos = 0;
       byte[] bytes;
+      boolean threwException = false;
       
       public TestInputStream() {
         bytes = new byte[256];
-        for (int i = 0; i < 256; i++) {
+        for (int i = pos; i < 256; i++) {
           bytes[i] = (byte)i;
         }
       }
@@ -175,8 +183,10 @@ public abstract class NativeS3FileSystemContractBaseTest
         shouldThrow = !shouldThrow;
         if (shouldThrow) {
           throwCount++;
+          threwException = true;
           throw new IOException();
         }
+        assertFalse("IOException was thrown. InputStream should be reopened", threwException);
         return pos++;
       }
       
@@ -185,9 +195,10 @@ public abstract class NativeS3FileSystemContractBaseTest
         shouldThrow = !shouldThrow;
         if (shouldThrow) {
           throwCount++;
+          threwException = true;
           throw new IOException();
         }
-        
+        assertFalse("IOException was thrown. InputStream should be reopened", threwException);
         int sizeToRead = Math.min(len, 256 - pos);
         for (int i = 0; i < sizeToRead; i++) {
           b[i] = bytes[pos + i];
@@ -195,13 +206,20 @@ public abstract class NativeS3FileSystemContractBaseTest
         pos += sizeToRead;
         return sizeToRead;
       }
+
+      public void reopenAt(long byteRangeStart) {
+        threwException = false;
+        pos = Long.valueOf(byteRangeStart).intValue();
+      }
+
     }
     
-    final InputStream is = new TestInputStream();
+    final TestInputStream is = new TestInputStream();
     
     class MockNativeFileSystemStore extends Jets3tNativeFileSystemStore {
       @Override
       public InputStream retrieve(String key, long byteRangeStart) throws IOException {
+        is.reopenAt(byteRangeStart);
         return is;
       }
     }
@@ -226,8 +244,9 @@ public abstract class NativeS3FileSystemContractBaseTest
     }
     
     // Test to make sure the throw path was exercised.
-    // 144 = 128 + (128 / 8)
-    assertEquals(144, ((TestInputStream)is).throwCount);
+    // every read should have thrown 1 IOException except for the first read
+    // 144 = 128 - 1 + (128 / 8)
+    assertEquals(143, ((TestInputStream)is).throwCount);
   }
 
 }

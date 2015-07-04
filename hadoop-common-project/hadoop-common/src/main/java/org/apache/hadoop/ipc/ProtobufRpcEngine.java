@@ -49,9 +49,8 @@ import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.ProtoUtil;
 import org.apache.hadoop.util.Time;
-import org.htrace.Sampler;
-import org.htrace.Trace;
-import org.htrace.TraceScope;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.BlockingService;
@@ -212,9 +211,7 @@ public class ProtobufRpcEngine implements RpcEngine {
       // guard it in the if statement to make sure there isn't
       // any extra string manipulation.
       if (Trace.isTracing()) {
-        traceScope = Trace.startSpan(
-            method.getDeclaringClass().getCanonicalName() +
-            "." + method.getName());
+        traceScope = Trace.startSpan(RpcClientUtil.methodToTraceString(method));
       }
 
       RequestHeaderProto rpcRequestHeader = constructRpcRequestHeader(method);

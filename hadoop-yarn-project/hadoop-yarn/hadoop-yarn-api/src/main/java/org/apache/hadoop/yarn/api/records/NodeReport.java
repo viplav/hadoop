@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.yarn.api.records;
 
+import java.util.Set;
+
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
@@ -26,31 +28,40 @@ import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p><code>NodeReport</code> is a summary of runtime information of a 
- * node in the cluster.</p>
- * 
- * <p>It includes details such as:
- *   <ul>
- *     <li>{@link NodeId} of the node.</li>
- *     <li>HTTP Tracking URL of the node.</li>
- *     <li>Rack name for the node.</li>
- *     <li>Used {@link Resource} on the node.</li>
- *     <li>Total available {@link Resource} of the node.</li>
- *     <li>Number of running containers on the node.</li>
- *   </ul>
- * </p>
+ * {@code NodeReport} is a summary of runtime information of a node
+ * in the cluster.
+ * <p>
+ * It includes details such as:
+ * <ul>
+ *   <li>{@link NodeId} of the node.</li>
+ *   <li>HTTP Tracking URL of the node.</li>
+ *   <li>Rack name for the node.</li>
+ *   <li>Used {@link Resource} on the node.</li>
+ *   <li>Total available {@link Resource} of the node.</li>
+ *   <li>Number of running containers on the node.</li>
+ * </ul>
  *
  * @see ApplicationClientProtocol#getClusterNodes(org.apache.hadoop.yarn.api.protocolrecords.GetClusterNodesRequest)
  */
 @Public
 @Stable
 public abstract class NodeReport {
-
+  
   @Private
   @Unstable
   public static NodeReport newInstance(NodeId nodeId, NodeState nodeState,
       String httpAddress, String rackName, Resource used, Resource capability,
       int numContainers, String healthReport, long lastHealthReportTime) {
+    return newInstance(nodeId, nodeState, httpAddress, rackName, used,
+        capability, numContainers, healthReport, lastHealthReportTime, null);
+  }
+
+  @Private
+  @Unstable
+  public static NodeReport newInstance(NodeId nodeId, NodeState nodeState,
+      String httpAddress, String rackName, Resource used, Resource capability,
+      int numContainers, String healthReport, long lastHealthReportTime,
+      Set<String> nodeLabels) {
     NodeReport nodeReport = Records.newRecord(NodeReport.class);
     nodeReport.setNodeId(nodeId);
     nodeReport.setNodeState(nodeState);
@@ -61,6 +72,7 @@ public abstract class NodeReport {
     nodeReport.setNumContainers(numContainers);
     nodeReport.setHealthReport(healthReport);
     nodeReport.setLastHealthReportTime(lastHealthReportTime);
+    nodeReport.setNodeLabels(nodeLabels);
     return nodeReport;
   }
 
@@ -172,4 +184,16 @@ public abstract class NodeReport {
   @Private
   @Unstable
   public abstract void setLastHealthReportTime(long lastHealthReport);
+  
+  /**
+   * Get labels of this node
+   * @return labels of this node
+   */
+  @Public
+  @Stable
+  public abstract Set<String> getNodeLabels();
+  
+  @Private
+  @Unstable
+  public abstract void setNodeLabels(Set<String> nodeLabels);
 }

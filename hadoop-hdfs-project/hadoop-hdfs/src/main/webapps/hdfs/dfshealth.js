@@ -21,6 +21,7 @@
   dust.loadSource(dust.compile($('#tmpl-dfshealth').html(), 'dfshealth'));
   dust.loadSource(dust.compile($('#tmpl-startup-progress').html(), 'startup-progress'));
   dust.loadSource(dust.compile($('#tmpl-datanode').html(), 'datanode-info'));
+  dust.loadSource(dust.compile($('#tmpl-datanode-volume-failures').html(), 'datanode-volume-failures'));
   dust.loadSource(dust.compile($('#tmpl-snapshot').html(), 'snapshot-info'));
 
   function load_overview() {
@@ -53,6 +54,23 @@
     };
 
     var data = {};
+
+    $.ajax({'url': '/conf', 'dataType': 'xml', 'async': false}).done(
+      function(d) {
+        var $xml = $(d);
+        var namespace, nnId;
+        $xml.find('property').each(function(idx,v) {
+          if ($(v).find('name').text() === 'dfs.nameservice.id') {
+            namespace = $(v).find('value').text();
+          }
+          if ($(v).find('name').text() === 'dfs.ha.namenode.id') {
+            nnId = $(v).find('value').text();
+          }
+        });
+        if (namespace && nnId) {
+          data['HAInfo'] = {"Namespace": namespace, "NamenodeID": nnId};
+        }
+    });
 
     // Workarounds for the fact that JMXJsonServlet returns non-standard JSON strings
     function workaround(nn) {
@@ -176,6 +194,45 @@
       })).error(ajax_error_handler);
   }
 
+  function load_datanode_volume_failures() {
+
+    var HELPERS = {
+      'helper_date_tostring' : function (chunk, ctx, bodies, params) {
+        var value = dust.helpers.tap(params.value, chunk, ctx);
+        return chunk.write('' + new Date(Number(value)).toLocaleString());
+      }
+    };
+
+    function workaround(r) {
+      function node_map_to_array(nodes) {
+        var res = [];
+        for (var n in nodes) {
+          var p = nodes[n];
+          // Filter the display to only datanodes with volume failures.
+          if (p.volfails > 0) {
+            p.name = n;
+            res.push(p);
+          }
+        }
+        return res;
+      }
+
+      r.LiveNodes = node_map_to_array(JSON.parse(r.LiveNodes));
+      return r;
+    }
+
+    $.get(
+      '/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo',
+      guard_with_startup_progress(function (resp) {
+        var data = workaround(resp.beans[0]);
+        var base = dust.makeBase(HELPERS);
+        dust.render('datanode-volume-failures', base.push(data), function(err, out) {
+          $('#tab-datanode-volume-failures').html(out);
+          $('#ui-tabs a[href="#tab-datanode-volume-failures"]').tab('show');
+        });
+      })).error(ajax_error_handler);
+  }
+
   function load_snapshot_info() {
     $.get(
       '/jmx?qry=Hadoop:service=NameNode,name=SnapshotInfo',
@@ -192,6 +249,9 @@
     switch(hash) {
       case "#tab-datanode":
         load_datanode_info();
+        break;
+      case "#tab-datanode-volume-failures":
+        load_datanode_volume_failures();
         break;
       case "#tab-snapshot":
         load_snapshot_info();

@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.FilterParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.GroupParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.LenParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.ModifiedTimeParam;
+import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.NewLengthParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OffsetParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OperationParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OverwriteParam;
@@ -59,6 +60,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.Consumes;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.GET;
@@ -84,7 +86,7 @@ import java.util.Map;
 
 /**
  * Main class of HttpFSServer server.
- * <p/>
+ * <p>
  * The <code>HttpFSServer</code> class uses Jersey JAX-RS to binds HTTP requests to the
  * different operations.
  */
@@ -102,7 +104,7 @@ public class HttpFSServer {
    *
    * @return FileSystemExecutor response
    *
-   * @throws IOException thrown if an IO error occurrs.
+   * @throws IOException thrown if an IO error occurs.
    * @throws FileSystemAccessException thrown if a FileSystemAccess releated error occurred. Thrown
    * exceptions are handled by {@link HttpFSExceptionProvider}.
    */
@@ -116,7 +118,7 @@ public class HttpFSServer {
   /**
    * Returns a filesystem instance. The fileystem instance is wired for release at the completion of
    * the current Servlet request via the {@link FileSystemReleaseFilter}.
-   * <p/>
+   * <p>
    * If a do-as user is specified, the current user must be a valid proxyuser, otherwise an
    * <code>AccessControlException</code> will be thrown.
    *
@@ -164,9 +166,10 @@ public class HttpFSServer {
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   public Response getRoot(@QueryParam(OperationParam.NAME) OperationParam op,
-                          @Context Parameters params)
+                          @Context Parameters params,
+                          @Context HttpServletRequest request)
     throws IOException, FileSystemAccessException {
-    return get("", op, params);
+    return get("", op, params, request);
   }
 
   private String makeAbsolute(String path) {
@@ -193,12 +196,14 @@ public class HttpFSServer {
   @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
   public Response get(@PathParam("path") String path,
                       @QueryParam(OperationParam.NAME) OperationParam op,
-                      @Context Parameters params)
+                      @Context Parameters params,
+                      @Context HttpServletRequest request)
     throws IOException, FileSystemAccessException {
     UserGroupInformation user = HttpUserGroupInformation.get();
     Response response;
     path = makeAbsolute(path);
     MDC.put(HttpFSFileSystem.OP_PARAM, op.value().name());
+    MDC.put("hostname", request.getRemoteAddr());
     switch (op.value()) {
       case OPEN: {
         //Invoking the command directly using an unmanaged FileSystem that is
@@ -334,12 +339,14 @@ public class HttpFSServer {
   @Produces(MediaType.APPLICATION_JSON)
   public Response delete(@PathParam("path") String path,
                          @QueryParam(OperationParam.NAME) OperationParam op,
-                         @Context Parameters params)
+                         @Context Parameters params,
+                         @Context HttpServletRequest request)
     throws IOException, FileSystemAccessException {
     UserGroupInformation user = HttpUserGroupInformation.get();
     Response response;
     path = makeAbsolute(path);
     MDC.put(HttpFSFileSystem.OP_PARAM, op.value().name());
+    MDC.put("hostname", request.getRemoteAddr());
     switch (op.value()) {
       case DELETE: {
         Boolean recursive =
@@ -385,12 +392,14 @@ public class HttpFSServer {
                        @Context UriInfo uriInfo,
                        @PathParam("path") String path,
                        @QueryParam(OperationParam.NAME) OperationParam op,
-                       @Context Parameters params)
+                       @Context Parameters params,
+                       @Context HttpServletRequest request)
     throws IOException, FileSystemAccessException {
     UserGroupInformation user = HttpUserGroupInformation.get();
     Response response;
     path = makeAbsolute(path);
     MDC.put(HttpFSFileSystem.OP_PARAM, op.value().name());
+    MDC.put("hostname", request.getRemoteAddr());
     switch (op.value()) {
       case APPEND: {
         Boolean hasData = params.get(DataParam.NAME, DataParam.class);
@@ -417,6 +426,15 @@ public class HttpFSServer {
         AUDIT_LOG.info("[{}]", path);
         System.out.println("SENT RESPONSE");
         response = Response.ok().build();
+        break;
+      }
+      case TRUNCATE: {
+        Long newLength = params.get(NewLengthParam.NAME, NewLengthParam.class);
+        FSOperations.FSTruncate command = 
+            new FSOperations.FSTruncate(path, newLength);
+        JSONObject json = fsExecute(user, command);
+        AUDIT_LOG.info("Truncate [{}] to length [{}]", path, newLength);
+        response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
         break;
       }
       default: {
@@ -469,12 +487,14 @@ public class HttpFSServer {
                        @Context UriInfo uriInfo,
                        @PathParam("path") String path,
                        @QueryParam(OperationParam.NAME) OperationParam op,
-                       @Context Parameters params)
+                       @Context Parameters params,
+                       @Context HttpServletRequest request)
     throws IOException, FileSystemAccessException {
     UserGroupInformation user = HttpUserGroupInformation.get();
     Response response;
     path = makeAbsolute(path);
     MDC.put(HttpFSFileSystem.OP_PARAM, op.value().name());
+    MDC.put("hostname", request.getRemoteAddr());
     switch (op.value()) {
       case CREATE: {
         Boolean hasData = params.get(DataParam.NAME, DataParam.class);

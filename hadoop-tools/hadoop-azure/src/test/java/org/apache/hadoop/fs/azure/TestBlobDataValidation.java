@@ -39,16 +39,16 @@ import org.apache.hadoop.fs.azure.AzureNativeFileSystemStore.TestHookOperationCo
 import org.junit.After;
 import org.junit.Test;
 
-import com.microsoft.windowsazure.storage.Constants;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.ResponseReceivedEvent;
-import com.microsoft.windowsazure.storage.StorageErrorCodeStrings;
-import com.microsoft.windowsazure.storage.StorageEvent;
-import com.microsoft.windowsazure.storage.StorageException;
-import com.microsoft.windowsazure.storage.blob.BlockEntry;
-import com.microsoft.windowsazure.storage.blob.BlockSearchMode;
-import com.microsoft.windowsazure.storage.blob.CloudBlockBlob;
-import com.microsoft.windowsazure.storage.core.Base64;
+import com.microsoft.azure.storage.Constants;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.ResponseReceivedEvent;
+import com.microsoft.azure.storage.StorageErrorCodeStrings;
+import com.microsoft.azure.storage.StorageEvent;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.BlockEntry;
+import com.microsoft.azure.storage.blob.BlockSearchMode;
+import com.microsoft.azure.storage.blob.CloudBlockBlob;
+import com.microsoft.azure.storage.core.Base64;
 
 /**
  * Test that we do proper data integrity validation with MD5 checks as
@@ -128,7 +128,7 @@ public class TestBlobDataValidation {
       if (!expectMd5Stored) {
         throw ex;
       }
-      StorageException cause = (StorageException) ex.getCause();
+      StorageException cause = (StorageException)ex.getCause();
       assertNotNull(cause);
       assertTrue("Unexpected cause: " + cause,
           cause.getErrorCode().equals(StorageErrorCodeStrings.INVALID_MD5));
@@ -191,6 +191,7 @@ public class TestBlobDataValidation {
 
     private static boolean isPutBlock(HttpURLConnection connection) {
       return connection.getRequestMethod().equals("PUT")
+          && connection.getURL().getQuery() != null
           && connection.getURL().getQuery().contains("blockid");
     }
 
@@ -212,13 +213,13 @@ public class TestBlobDataValidation {
     // validate the data as expected, but the HttpURLConnection wasn't
     // pluggable enough for me to do that.
     testAccount.getFileSystem().getStore()
-        .addTestHookToOperationContext(new TestHookOperationContext() {
-          @Override
+    .addTestHookToOperationContext(new TestHookOperationContext() {
+    @Override
           public OperationContext modifyOperationContext(
               OperationContext original) {
-            original.getResponseReceivedEventHandler().addListener(
-                new ContentMD5Checker(expectMd5Checked));
-            return original;
+      original.getResponseReceivedEventHandler().addListener(
+          new ContentMD5Checker(expectMd5Checked));
+      return original;
           }
         });
 

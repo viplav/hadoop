@@ -64,6 +64,7 @@ import org.apache.hadoop.security.SaslPropertiesResolver;
  */
 @InterfaceAudience.Private
 public class DNConf {
+  final Configuration conf;
   final int socketTimeout;
   final int socketWriteTimeout;
   final int socketKeepaliveTimeout;
@@ -81,8 +82,7 @@ public class DNConf {
   final long heartBeatInterval;
   final long blockReportInterval;
   final long blockReportSplitThreshold;
-  final long deleteReportInterval;
-  final long initialBlockReportDelay;
+  final long initialBlockReportDelayMs;
   final long cacheReportInterval;
   final long dfsclientSlowIoWarningThresholdMs;
   final long datanodeSlowIoWarningThresholdMs;
@@ -100,6 +100,7 @@ public class DNConf {
   final long maxLockedMemory;
 
   public DNConf(Configuration conf) {
+    this.conf = conf;
     socketTimeout = conf.getInt(DFS_CLIENT_SOCKET_TIMEOUT_KEY,
         HdfsServerConstants.READ_TIMEOUT);
     socketWriteTimeout = conf.getInt(DFS_DATANODE_SOCKET_WRITE_TIMEOUT_KEY,
@@ -154,15 +155,15 @@ public class DNConf {
         DFS_BLOCKREPORT_INITIAL_DELAY_DEFAULT) * 1000L;
     if (initBRDelay >= blockReportInterval) {
       initBRDelay = 0;
-      DataNode.LOG.info("dfs.blockreport.initialDelay is greater than " +
-          "dfs.blockreport.intervalMsec." + " Setting initial delay to 0 msec:");
+      DataNode.LOG.info("dfs.blockreport.initialDelay is "
+          + "greater than or equal to" + "dfs.blockreport.intervalMsec."
+          + " Setting initial delay to 0 msec:");
     }
-    initialBlockReportDelay = initBRDelay;
+    initialBlockReportDelayMs = initBRDelay;
     
     heartBeatInterval = conf.getLong(DFS_HEARTBEAT_INTERVAL_KEY,
         DFS_HEARTBEAT_INTERVAL_DEFAULT) * 1000L;
     
-    this.deleteReportInterval = 100 * heartBeatInterval;
     // do we need to sync block file contents to disk when blockfile is closed?
     this.syncOnClose = conf.getBoolean(DFS_DATANODE_SYNCONCLOSE_KEY, 
         DFS_DATANODE_SYNCONCLOSE_DEFAULT);
@@ -196,6 +197,15 @@ public class DNConf {
   // We get minimumNameNodeVersion via a method so it can be mocked out in tests.
   String getMinimumNameNodeVersion() {
     return this.minimumNameNodeVersion;
+  }
+  
+  /**
+   * Returns the configuration.
+   * 
+   * @return Configuration the configuration
+   */
+  public Configuration getConf() {
+    return conf;
   }
 
   /**

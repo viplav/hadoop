@@ -36,7 +36,7 @@ public interface BlockCollection {
   /** 
    * Get content summary.
    */
-  public ContentSummary computeContentSummary();
+  public ContentSummary computeContentSummary(BlockStoragePolicySuite bsps);
 
   /**
    * @return the number of blocks
@@ -58,7 +58,7 @@ public interface BlockCollection {
    * Get block replication for the collection 
    * @return block replication value
    */
-  public short getBlockReplication();
+  public short getPreferredBlockReplication();
 
   /** 
    * @return the storage policy ID.

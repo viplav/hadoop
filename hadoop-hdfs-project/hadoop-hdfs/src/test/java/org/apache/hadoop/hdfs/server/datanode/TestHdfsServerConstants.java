@@ -17,12 +17,12 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
-import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.*;
-import org.junit.Test;
-
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
-import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.assertThat;
+
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.RollingUpgradeStartupOption;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.junit.Test;
 
 
 /**
@@ -43,10 +43,10 @@ public class TestHdfsServerConstants {
       RollingUpgradeStartupOption expectedRollupOption) {
 
     StartupOption option = StartupOption.getEnum(value);
-    assertThat(option, is(expectedOption));
+    assertEquals(expectedOption, option);
 
     if (expectedRollupOption != null) {
-      assertThat(option.getRollingUpgradeStartupOption(), is(expectedRollupOption));
+      assertEquals(expectedRollupOption, option.getRollingUpgradeStartupOption());
     }
   }
 
@@ -61,7 +61,6 @@ public class TestHdfsServerConstants {
     verifyStartupOptionResult("CHECKPOINT", StartupOption.CHECKPOINT, null);
     verifyStartupOptionResult("UPGRADE", StartupOption.UPGRADE, null);
     verifyStartupOptionResult("ROLLBACK", StartupOption.ROLLBACK, null);
-    verifyStartupOptionResult("FINALIZE", StartupOption.FINALIZE, null);
     verifyStartupOptionResult("ROLLINGUPGRADE", StartupOption.ROLLINGUPGRADE, null);
     verifyStartupOptionResult("IMPORT", StartupOption.IMPORT, null);
     verifyStartupOptionResult("INITIALIZESHAREDEDITS", StartupOption.INITIALIZESHAREDEDITS, null);
@@ -83,9 +82,9 @@ public class TestHdfsServerConstants {
     verifyStartupOptionResult("ROLLINGUPGRADE(ROLLBACK)",
                               StartupOption.ROLLINGUPGRADE,
                               RollingUpgradeStartupOption.ROLLBACK);
-    verifyStartupOptionResult("ROLLINGUPGRADE(DOWNGRADE)",
-                              StartupOption.ROLLINGUPGRADE,
-                              RollingUpgradeStartupOption.DOWNGRADE);
+    verifyStartupOptionResult("ROLLINGUPGRADE(STARTED)",
+        StartupOption.ROLLINGUPGRADE,
+        RollingUpgradeStartupOption.STARTED);
 
     try {
       verifyStartupOptionResult("ROLLINGUPGRADE(UNKNOWNOPTION)", StartupOption.ROLLINGUPGRADE, null);

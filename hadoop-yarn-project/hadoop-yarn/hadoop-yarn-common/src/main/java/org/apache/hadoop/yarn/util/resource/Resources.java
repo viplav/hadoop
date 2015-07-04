@@ -70,7 +70,7 @@ public class Resources {
 
     @Override
     public void setMemory(int memory) {
-      throw new RuntimeException("NONE cannot be modified!");
+      throw new RuntimeException("UNBOUNDED cannot be modified!");
     }
 
     @Override
@@ -80,14 +80,14 @@ public class Resources {
 
     @Override
     public void setVirtualCores(int cores) {
-      throw new RuntimeException("NONE cannot be modified!");
+      throw new RuntimeException("UNBOUNDED cannot be modified!");
     }
 
     @Override
     public int compareTo(Resource o) {
-      int diff = 0 - o.getMemory();
+      int diff = Integer.MAX_VALUE - o.getMemory();
       if (diff == 0) {
-        diff = 0 - o.getVirtualCores();
+        diff = Integer.MAX_VALUE - o.getVirtualCores();
       }
       return diff;
     }
@@ -259,5 +259,10 @@ public class Resources {
   public static Resource componentwiseMin(Resource lhs, Resource rhs) {
     return createResource(Math.min(lhs.getMemory(), rhs.getMemory()),
         Math.min(lhs.getVirtualCores(), rhs.getVirtualCores()));
+  }
+  
+  public static Resource componentwiseMax(Resource lhs, Resource rhs) {
+    return createResource(Math.max(lhs.getMemory(), rhs.getMemory()),
+        Math.max(lhs.getVirtualCores(), rhs.getVirtualCores()));
   }
 }

@@ -20,29 +20,60 @@ package org.apache.hadoop.hdfs.server.mover;
 import java.io.IOException;
 import java.net.URI;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.collect.Maps;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.*;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.balancer.Dispatcher.DBlock;
+import org.apache.hadoop.hdfs.server.balancer.ExitStatus;
 import org.apache.hadoop.hdfs.server.balancer.NameNodeConnector;
+import org.apache.hadoop.hdfs.server.balancer.TestBalancer;
 import org.apache.hadoop.hdfs.server.mover.Mover.MLocation;
 import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.util.GenericOptionsParser;
+import org.apache.hadoop.util.ToolRunner;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class TestMover {
+
+  static final int DEFAULT_BLOCK_SIZE = 100;
+
+  static {
+    TestBalancer.initTestSetup();
+  }
+
+  static void initConf(Configuration conf) {
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, DEFAULT_BLOCK_SIZE);
+    conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, DEFAULT_BLOCK_SIZE);
+    conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1L);
+    conf.setLong(DFSConfigKeys.DFS_BALANCER_MOVEDWINWIDTH_KEY, 2000L);
+  }
+
   static Mover newMover(Configuration conf) throws IOException {
     final Collection<URI> namenodes = DFSUtil.getNsServiceRpcUris(conf);
     Assert.assertEquals(1, namenodes.size());
+    Map<URI, List<Path>> nnMap = Maps.newHashMap();
+    for (URI nn : namenodes) {
+      nnMap.put(nn, null);
+    }
 
     final List<NameNodeConnector> nncs = NameNodeConnector.newNameNodeConnectors(
-        namenodes, Mover.class.getSimpleName(), Mover.MOVER_ID_PATH, conf);
-    return new Mover(nncs.get(0), conf);
+        nnMap, Mover.class.getSimpleName(), Mover.MOVER_ID_PATH, conf,
+        NameNodeConnector.DEFAULT_MAX_IDLE_ITERATIONS);
+    return new Mover(nncs.get(0), conf, new AtomicInteger(0));
   }
 
   @Test
@@ -74,6 +105,53 @@ public class TestMover {
           Arrays.asList(StorageType.DEFAULT, StorageType.DEFAULT));
       Assert.assertTrue(processor.scheduleMoveReplica(db, ml, storageTypes));
       Assert.assertFalse(processor.scheduleMoveReplica(db, ml, storageTypes));
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testScheduleBlockWithinSameNode() throws Exception {
+    final Configuration conf = new HdfsConfiguration();
+    initConf(conf);
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(3)
+        .storageTypes(
+            new StorageType[] { StorageType.DISK, StorageType.ARCHIVE })
+        .build();
+    try {
+      cluster.waitActive();
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+      final String file = "/testScheduleWithinSameNode/file";
+      Path dir = new Path("/testScheduleWithinSameNode");
+      dfs.mkdirs(dir);
+      // write to DISK
+      dfs.setStoragePolicy(dir, "HOT");
+      {
+        final FSDataOutputStream out = dfs.create(new Path(file));
+        out.writeChars("testScheduleWithinSameNode");
+        out.close();
+      }
+
+      //verify before movement
+      LocatedBlock lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+      StorageType[] storageTypes = lb.getStorageTypes();
+      for (StorageType storageType : storageTypes) {
+        Assert.assertTrue(StorageType.DISK == storageType);
+      }
+      // move to ARCHIVE
+      dfs.setStoragePolicy(dir, "COLD");
+      int rc = ToolRunner.run(conf, new Mover.Cli(),
+          new String[] { "-p", dir.toString() });
+      Assert.assertEquals("Movement to ARCHIVE should be successfull", 0, rc);
+
+      // Wait till namenode notified
+      Thread.sleep(3000);
+      lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+      storageTypes = lb.getStorageTypes();
+      for (StorageType storageType : storageTypes) {
+        Assert.assertTrue(StorageType.ARCHIVE == storageType);
+      }
     } finally {
       cluster.shutdown();
     }
@@ -217,6 +295,118 @@ public class TestMover {
       checkMovePaths(movePaths.get(nn3), new Path("/foobar"));
     } finally {
        cluster.shutdown();
+    }
+  }
+
+  @Test(timeout = 300000)
+  public void testTwoReplicaSameStorageTypeShouldNotSelect() throws Exception {
+    // HDFS-8147
+    final Configuration conf = new HdfsConfiguration();
+    initConf(conf);
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(3)
+        .storageTypes(
+            new StorageType[][] { { StorageType.DISK, StorageType.ARCHIVE },
+                { StorageType.DISK, StorageType.DISK },
+                { StorageType.DISK, StorageType.ARCHIVE } }).build();
+    try {
+      cluster.waitActive();
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+      final String file = "/testForTwoReplicaSameStorageTypeShouldNotSelect";
+      // write to DISK
+      final FSDataOutputStream out = dfs.create(new Path(file), (short) 2);
+      out.writeChars("testForTwoReplicaSameStorageTypeShouldNotSelect");
+      out.close();
+
+      // verify before movement
+      LocatedBlock lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+      StorageType[] storageTypes = lb.getStorageTypes();
+      for (StorageType storageType : storageTypes) {
+        Assert.assertTrue(StorageType.DISK == storageType);
+      }
+      // move to ARCHIVE
+      dfs.setStoragePolicy(new Path(file), "COLD");
+      int rc = ToolRunner.run(conf, new Mover.Cli(),
+          new String[] { "-p", file.toString() });
+      Assert.assertEquals("Movement to ARCHIVE should be successfull", 0, rc);
+
+      // Wait till namenode notified
+      Thread.sleep(3000);
+      lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+      storageTypes = lb.getStorageTypes();
+      int archiveCount = 0;
+      for (StorageType storageType : storageTypes) {
+        if (StorageType.ARCHIVE == storageType) {
+          archiveCount++;
+        }
+      }
+      Assert.assertEquals(archiveCount, 2);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test(timeout = 300000)
+  public void testMoveWhenStoragePolicyNotSatisfying() throws Exception {
+    // HDFS-8147
+    final Configuration conf = new HdfsConfiguration();
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(3)
+        .storageTypes(
+            new StorageType[][] { { StorageType.DISK }, { StorageType.DISK },
+                { StorageType.DISK } }).build();
+    try {
+      cluster.waitActive();
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+      final String file = "/testMoveWhenStoragePolicyNotSatisfying";
+      // write to DISK
+      final FSDataOutputStream out = dfs.create(new Path(file));
+      out.writeChars("testMoveWhenStoragePolicyNotSatisfying");
+      out.close();
+
+      // move to ARCHIVE
+      dfs.setStoragePolicy(new Path(file), "COLD");
+      int rc = ToolRunner.run(conf, new Mover.Cli(),
+          new String[] { "-p", file.toString() });
+      int exitcode = ExitStatus.NO_MOVE_BLOCK.getExitCode();
+      Assert.assertEquals("Exit code should be " + exitcode, exitcode, rc);
+    } finally {
+      cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testMoverFailedRetry() throws Exception {
+    // HDFS-8147
+    final Configuration conf = new HdfsConfiguration();
+    initConf(conf);
+    conf.set(DFSConfigKeys.DFS_MOVER_RETRY_MAX_ATTEMPTS_KEY, "2");
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(3)
+        .storageTypes(
+            new StorageType[][] {{StorageType.DISK, StorageType.ARCHIVE},
+                {StorageType.DISK, StorageType.ARCHIVE},
+                {StorageType.DISK, StorageType.ARCHIVE}}).build();
+    try {
+      cluster.waitActive();
+      final DistributedFileSystem dfs = cluster.getFileSystem();
+      final String file = "/testMoverFailedRetry";
+      // write to DISK
+      final FSDataOutputStream out = dfs.create(new Path(file), (short) 2);
+      out.writeChars("testMoverFailedRetry");
+      out.close();
+
+      // Delete block file so, block move will fail with FileNotFoundException
+      LocatedBlock lb = dfs.getClient().getLocatedBlocks(file, 0).get(0);
+      cluster.corruptBlockOnDataNodesByDeletingBlockFile(lb.getBlock());
+      // move to ARCHIVE
+      dfs.setStoragePolicy(new Path(file), "COLD");
+      int rc = ToolRunner.run(conf, new Mover.Cli(),
+          new String[] {"-p", file.toString()});
+      Assert.assertEquals("Movement should fail after some retry",
+          ExitStatus.IO_EXCEPTION.getExitCode(), rc);
+    } finally {
+      cluster.shutdown();
     }
   }
 }

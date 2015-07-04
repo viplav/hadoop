@@ -132,6 +132,19 @@ public interface FSNamesystemMBean {
   public int getNumDecomDeadDataNodes();
 
   /**
+   * Number of failed data volumes across all live data nodes.
+   * @return number of failed data volumes across all live data nodes
+   */
+  int getVolumeFailuresTotal();
+
+  /**
+   * Returns an estimate of total capacity lost due to volume failures in bytes
+   * across all live data nodes.
+   * @return estimate of total capacity lost in bytes
+   */
+  long getEstimatedCapacityLostTotal();
+
+  /**
    * Number of data nodes that are in the decommissioning state
    */
   public int getNumDecommissioningDataNodes();
@@ -153,9 +166,22 @@ public interface FSNamesystemMBean {
   long getPendingDeletionBlocks();
 
   /**
+   * Time when block deletions will begin
+   * @return time when block deletions will begin
+   */
+  long getBlockDeletionStartTime();
+
+  /**
    * Number of content stale storages.
    * @return number of content stale storages
    */
   public int getNumStaleStorages();
 
+  /**
+   * Returns a nested JSON object listing the top users for different RPC 
+   * operations over tracked time windows.
+   * 
+   * @return JSON string
+   */
+  public String getTopUserOpCounts();
 }

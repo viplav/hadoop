@@ -19,6 +19,9 @@
 package org.apache.hadoop.fs;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.crypto.CipherSuite;
+import org.apache.hadoop.crypto.JceAesCtrCryptoCodec;
+import org.apache.hadoop.crypto.OpensslAesCtrCryptoCodec;
 
 /** 
  * This class contains constants for configuration keys used
@@ -34,11 +37,6 @@ import org.apache.hadoop.classification.InterfaceAudience;
 public class CommonConfigurationKeysPublic {
   
   // The Keys
-  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
-  public static final String  IO_NATIVE_LIB_AVAILABLE_KEY =
-    "io.native.lib.available";
-  /** Default value for IO_NATIVE_LIB_AVAILABLE_KEY */
-  public static final boolean IO_NATIVE_LIB_AVAILABLE_DEFAULT = true;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY =
     "net.topology.script.number.args";
@@ -206,8 +204,12 @@ public class CommonConfigurationKeysPublic {
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_CLIENT_TCPNODELAY_KEY =
     "ipc.client.tcpnodelay";
-  /** Defalt value for IPC_CLIENT_TCPNODELAY_KEY */
+  /** Default value for IPC_CLIENT_TCPNODELAY_KEY */
   public static final boolean IPC_CLIENT_TCPNODELAY_DEFAULT = true;
+  /** Enable low-latency connections from the client */
+  public static final String   IPC_CLIENT_LOW_LATENCY = "ipc.client.low-latency";
+  /** Default value of IPC_CLIENT_LOW_LATENCY */
+  public static final boolean  IPC_CLIENT_LOW_LATENCY_DEFAULT = false;
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  IPC_SERVER_LISTEN_QUEUE_SIZE_KEY =
     "ipc.server.listen.queue.size";
@@ -227,6 +229,11 @@ public class CommonConfigurationKeysPublic {
     "ipc.server.tcpnodelay";
   /** Default value for IPC_SERVER_TCPNODELAY_KEY */
   public static final boolean IPC_SERVER_TCPNODELAY_DEFAULT = true;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String  IPC_SERVER_MAX_CONNECTIONS_KEY =
+    "ipc.server.max.connections";
+  /** Default value for IPC_SERVER_MAX_CONNECTIONS_KEY */
+  public static final int     IPC_SERVER_MAX_CONNECTIONS_DEFAULT = 0;
 
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String  HADOOP_RPC_SOCKET_FACTORY_CLASS_DEFAULT_KEY =
@@ -290,6 +297,14 @@ public class CommonConfigurationKeysPublic {
     "hadoop.security.saslproperties.resolver.class";
   public static final String HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX = 
     "hadoop.security.crypto.codec.classes";
+  public static final String
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_AES_CTR_NOPADDING_KEY =
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_KEY_PREFIX
+          + CipherSuite.AES_CTR_NOPADDING.getConfigSuffix();
+  public static final String
+      HADOOP_SECURITY_CRYPTO_CODEC_CLASSES_AES_CTR_NOPADDING_DEFAULT =
+      OpensslAesCtrCryptoCodec.class.getName() + "," +
+          JceAesCtrCryptoCodec.class.getName();
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String HADOOP_SECURITY_CRYPTO_CIPHER_SUITE_KEY =
     "hadoop.security.crypto.cipher.suite";
@@ -307,7 +322,7 @@ public class CommonConfigurationKeysPublic {
   public static final String  HADOOP_SECURITY_IMPERSONATION_PROVIDER_CLASS =
     "hadoop.security.impersonation.provider.class";
 
-  //  <!--- KMSClientProvider configurations —>
+  //  <!-- KMSClientProvider configurations -->
   /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
   public static final String KMS_CLIENT_ENC_KEY_CACHE_SIZE =
       "hadoop.security.kms.client.encrypted.key.cache.size";
@@ -348,5 +363,11 @@ public class CommonConfigurationKeysPublic {
     "hadoop.security.random.device.file.path";
   public static final String HADOOP_SECURITY_SECURE_RANDOM_DEVICE_FILE_PATH_DEFAULT = 
     "/dev/urandom";
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml</a> */
+  public static final String HADOOP_SHELL_MISSING_DEFAULT_FS_WARNING_KEY =
+      "hadoop.shell.missing.defaultFs.warning";
+  public static final boolean HADOOP_SHELL_MISSING_DEFAULT_FS_WARNING_DEFAULT =
+      false;
 }
 

@@ -19,34 +19,45 @@ package org.apache.hadoop.hdfs.tools.offlineImageViewer;
 
 import java.io.BufferedInputStream;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
+import com.google.common.collect.ImmutableList;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.InvalidProtocolBufferException;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.XAttr;
 import org.apache.hadoop.fs.permission.AclEntry;
+import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormatPBINode;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormatProtobuf;
 import org.apache.hadoop.hdfs.server.namenode.FSImageUtil;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto;
 import org.apache.hadoop.hdfs.server.namenode.INodeId;
+import org.apache.hadoop.hdfs.web.JsonUtil;
+import org.apache.hadoop.hdfs.web.resources.XAttrEncodingParam;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.util.LimitInputStream;
 import org.codehaus.jackson.map.ObjectMapper;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.io.LimitInputStream;
 
 /**
  * FSImageLoader loads fsimage and provide methods to return JSON formatted
@@ -55,14 +66,38 @@ import com.google.common.io.LimitInputStream;
 class FSImageLoader {
   public static final Log LOG = LogFactory.getLog(FSImageHandler.class);
 
-  private static String[] stringTable;
-  private static Map<Long, FsImageProto.INodeSection.INode> inodes =
-      Maps.newHashMap();
-  private static Map<Long, long[]> dirmap = Maps.newHashMap();
-  private static List<FsImageProto.INodeReferenceSection.INodeReference>
-      refList = Lists.newArrayList();
+  private final String[] stringTable;
+  // byte representation of inodes, sorted by id
+  private final byte[][] inodes;
+  private final Map<Long, long[]> dirmap;
+  private static final Comparator<byte[]> INODE_BYTES_COMPARATOR = new
+          Comparator<byte[]>() {
+    @Override
+    public int compare(byte[] o1, byte[] o2) {
+      try {
+        final FsImageProto.INodeSection.INode l = FsImageProto.INodeSection
+                .INode.parseFrom(o1);
+        final FsImageProto.INodeSection.INode r = FsImageProto.INodeSection
+                .INode.parseFrom(o2);
+        if (l.getId() < r.getId()) {
+          return -1;
+        } else if (l.getId() > r.getId()) {
+          return 1;
+        } else {
+          return 0;
+        }
+      } catch (InvalidProtocolBufferException e) {
+        throw new RuntimeException(e);
+      }
+    }
+  };
 
-  private FSImageLoader() {}
+  private FSImageLoader(String[] stringTable, byte[][] inodes,
+                        Map<Long, long[]> dirmap) {
+    this.stringTable = stringTable;
+    this.inodes = inodes;
+    this.dirmap = dirmap;
+  }
 
   /**
    * Load fsimage into the memory.
@@ -78,9 +113,14 @@ class FSImageLoader {
     }
 
     FsImageProto.FileSummary summary = FSImageUtil.loadSummary(file);
-    FileInputStream fin = null;
-    try {
-      fin = new FileInputStream(file.getFD());
+
+
+    try (FileInputStream fin = new FileInputStream(file.getFD())) {
+      // Map to record INodeReference to the referred id
+      ImmutableList<Long> refIdList = null;
+      String[] stringTable = null;
+      byte[][] inodes = null;
+      Map<Long, long[]> dirmap = null;
 
       ArrayList<FsImageProto.FileSummary.Section> sections =
           Lists.newArrayList(summary.getSectionsList());
@@ -109,34 +149,37 @@ class FSImageLoader {
             summary.getCodec(), new BufferedInputStream(new LimitInputStream(
             fin, s.getLength())));
 
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Loading section " + s.getName() + " length: " + s.getLength
+              ());
+        }
         switch (FSImageFormatProtobuf.SectionName.fromString(s.getName())) {
           case STRING_TABLE:
-            loadStringTable(is);
+            stringTable = loadStringTable(is);
             break;
           case INODE:
-            loadINodeSection(is);
+            inodes = loadINodeSection(is);
             break;
           case INODE_REFERENCE:
-            loadINodeReferenceSection(is);
+            refIdList = loadINodeReferenceSection(is);
             break;
           case INODE_DIR:
-            loadINodeDirectorySection(is);
+            dirmap = loadINodeDirectorySection(is, refIdList);
             break;
           default:
             break;
         }
       }
-    } finally {
-      IOUtils.cleanup(null, fin);
+      return new FSImageLoader(stringTable, inodes, dirmap);
     }
-    return new FSImageLoader();
   }
 
-  private static void loadINodeDirectorySection(InputStream in)
+  private static Map<Long, long[]> loadINodeDirectorySection
+          (InputStream in, List<Long> refIdList)
       throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Loading directory section");
-    }
+    LOG.info("Loading inode directory section");
+    Map<Long, long[]> dirs = Maps.newHashMap();
+    long counter = 0;
     while (true) {
       FsImageProto.INodeDirectorySection.DirEntry e =
           FsImageProto.INodeDirectorySection.DirEntry.parseDelimitedFrom(in);
@@ -144,31 +187,27 @@ class FSImageLoader {
       if (e == null) {
         break;
       }
+      ++counter;
+
       long[] l = new long[e.getChildrenCount() + e.getRefChildrenCount()];
       for (int i = 0; i < e.getChildrenCount(); ++i) {
         l[i] = e.getChildren(i);
       }
       for (int i = e.getChildrenCount(); i < l.length; i++) {
         int refId = e.getRefChildren(i - e.getChildrenCount());
-        l[i] = refList.get(refId).getReferredId();
+        l[i] = refIdList.get(refId);
       }
-      dirmap.put(e.getParent(), l);
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Loaded directory (parent " + e.getParent()
-            + ") with " + e.getChildrenCount() + " children and "
-            + e.getRefChildrenCount() + " reference children");
-      }
+      dirs.put(e.getParent(), l);
     }
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Loaded " + dirmap.size() + " directories");
-    }
+    LOG.info("Loaded " + counter + " directories");
+    return dirs;
   }
 
-  private static void loadINodeReferenceSection(InputStream in)
+  private static ImmutableList<Long> loadINodeReferenceSection(InputStream in)
       throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Loading inode reference section");
-    }
+    LOG.info("Loading inode references");
+    ImmutableList.Builder<Long> builder = ImmutableList.builder();
+    long counter = 0;
     while (true) {
       FsImageProto.INodeReferenceSection.INodeReference e =
           FsImageProto.INodeReferenceSection.INodeReference
@@ -176,49 +215,44 @@ class FSImageLoader {
       if (e == null) {
         break;
       }
-      refList.add(e);
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("Loaded inode reference named '" + e.getName()
-            + "' referring to id " + e.getReferredId() + "");
-      }
+      ++counter;
+      builder.add(e.getReferredId());
     }
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Loaded " + refList.size() + " inode references");
-    }
+    LOG.info("Loaded " + counter + " inode references");
+    return builder.build();
   }
 
-  private static void loadINodeSection(InputStream in) throws IOException {
+  private static byte[][] loadINodeSection(InputStream in)
+          throws IOException {
     FsImageProto.INodeSection s = FsImageProto.INodeSection
         .parseDelimitedFrom(in);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Found " + s.getNumInodes() + " inodes in inode section");
-    }
+    LOG.info("Loading " + s.getNumInodes() + " inodes.");
+    final byte[][] inodes = new byte[(int) s.getNumInodes()][];
+
     for (int i = 0; i < s.getNumInodes(); ++i) {
-      FsImageProto.INodeSection.INode p = FsImageProto.INodeSection.INode
-          .parseDelimitedFrom(in);
-      inodes.put(p.getId(), p);
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("Loaded inode id " + p.getId() + " type " + p.getType()
-            + " name '" + p.getName().toStringUtf8() + "'");
-      }
+      int size = CodedInputStream.readRawVarint32(in.read(), in);
+      byte[] bytes = new byte[size];
+      IOUtils.readFully(in, bytes, 0, size);
+      inodes[i] = bytes;
     }
+    LOG.debug("Sorting inodes");
+    Arrays.sort(inodes, INODE_BYTES_COMPARATOR);
+    LOG.debug("Finished sorting inodes");
+    return inodes;
   }
 
-  private static void loadStringTable(InputStream in) throws IOException {
+  static String[] loadStringTable(InputStream in) throws
+  IOException {
     FsImageProto.StringTableSection s = FsImageProto.StringTableSection
         .parseDelimitedFrom(in);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Found " + s.getNumEntry() + " strings in string section");
-    }
-    stringTable = new String[s.getNumEntry() + 1];
+    LOG.info("Loading " + s.getNumEntry() + " strings");
+    String[] stringTable = new String[s.getNumEntry() + 1];
     for (int i = 0; i < s.getNumEntry(); ++i) {
       FsImageProto.StringTableSection.Entry e = FsImageProto
           .StringTableSection.Entry.parseDelimitedFrom(in);
       stringTable[e.getId()] = e.getStr();
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("Loaded string " + e.getStr());
-      }
     }
+    return stringTable;
   }
 
   /**
@@ -229,7 +263,7 @@ class FSImageLoader {
    */
   String getFileStatus(String path) throws IOException {
     ObjectMapper mapper = new ObjectMapper();
-    FsImageProto.INodeSection.INode inode = inodes.get(getINodeId(path));
+    FsImageProto.INodeSection.INode inode = fromINodeId(lookup(path));
     return "{\"FileStatus\":\n"
         + mapper.writeValueAsString(getFileStatus(inode, false)) + "\n}\n";
   }
@@ -256,10 +290,11 @@ class FSImageLoader {
     return sb.toString();
   }
 
-  private List<Map<String, Object>> getFileStatusList(String path) {
+  private List<Map<String, Object>> getFileStatusList(String path)
+          throws IOException {
     List<Map<String, Object>> list = new ArrayList<Map<String, Object>>();
-    long id = getINodeId(path);
-    FsImageProto.INodeSection.INode inode = inodes.get(id);
+    long id = lookup(path);
+    FsImageProto.INodeSection.INode inode = fromINodeId(id);
     if (inode.getType() == FsImageProto.INodeSection.INode.Type.DIRECTORY) {
       if (!dirmap.containsKey(id)) {
         // if the directory is empty, return empty list
@@ -267,12 +302,83 @@ class FSImageLoader {
       }
       long[] children = dirmap.get(id);
       for (long cid : children) {
-        list.add(getFileStatus(inodes.get(cid), true));
+        list.add(getFileStatus(fromINodeId(cid), true));
       }
     } else {
       list.add(getFileStatus(inode, false));
     }
     return list;
+  }
+
+  /**
+   * Return the JSON formatted XAttrNames of the specified file.
+   *
+   * @param path
+   *          a path specifies a file
+   * @return JSON formatted XAttrNames
+   * @throws IOException
+   *           if failed to serialize fileStatus to JSON.
+   */
+  String listXAttrs(String path) throws IOException {
+    return JsonUtil.toJsonString(getXAttrList(path));
+  }
+
+  /**
+   * Return the JSON formatted XAttrs of the specified file.
+   *
+   * @param path
+   *          a path specifies a file
+   * @return JSON formatted XAttrs
+   * @throws IOException
+   *           if failed to serialize fileStatus to JSON.
+   */
+  String getXAttrs(String path, List<String> names, String encoder)
+      throws IOException {
+
+    List<XAttr> xAttrs = getXAttrList(path);
+    List<XAttr> filtered;
+    if (names == null || names.size() == 0) {
+      filtered = xAttrs;
+    } else {
+      filtered = Lists.newArrayListWithCapacity(names.size());
+      for (String name : names) {
+        XAttr search = XAttrHelper.buildXAttr(name);
+
+        boolean found = false;
+        for (XAttr aXAttr : xAttrs) {
+          if (aXAttr.getNameSpace() == search.getNameSpace()
+              && aXAttr.getName().equals(search.getName())) {
+
+            filtered.add(aXAttr);
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          throw new IOException(
+              "At least one of the attributes provided was not found.");
+        }
+      }
+
+    }
+    return JsonUtil.toJsonString(filtered,
+        new XAttrEncodingParam(encoder).getEncoding());
+  }
+
+  private List<XAttr> getXAttrList(String path) throws IOException {
+    long id = lookup(path);
+    FsImageProto.INodeSection.INode inode = fromINodeId(id);
+    switch (inode.getType()) {
+    case FILE:
+      return FSImageFormatPBINode.Loader.loadXAttrs(
+          inode.getFile().getXAttrs(), stringTable);
+    case DIRECTORY:
+      return FSImageFormatPBINode.Loader.loadXAttrs(inode.getDirectory()
+          .getXAttrs(), stringTable);
+    default:
+      return null;
+    }
   }
 
   /**
@@ -282,32 +388,20 @@ class FSImageLoader {
    * @throws IOException if failed to serialize fileStatus to JSON.
    */
   String getAclStatus(String path) throws IOException {
-    StringBuilder sb = new StringBuilder();
-    List<AclEntry> aclEntryList = getAclEntryList(path);
     PermissionStatus p = getPermissionStatus(path);
-    sb.append("{\"AclStatus\":{\"entries\":[");
-    int i = 0;
-    for (AclEntry aclEntry : aclEntryList) {
-      if (i++ != 0) {
-        sb.append(',');
-      }
-      sb.append('"');
-      sb.append(aclEntry.toString());
-      sb.append('"');
-    }
-    sb.append("],\"group\": \"");
-    sb.append(p.getGroupName());
-    sb.append("\",\"owner\": \"");
-    sb.append(p.getUserName());
-    sb.append("\",\"stickyBit\": ");
-    sb.append(p.getPermission().getStickyBit());
-    sb.append("}}\n");
-    return sb.toString();
+    List<AclEntry> aclEntryList = getAclEntryList(path);
+    FsPermission permission = p.getPermission();
+    AclStatus.Builder builder = new AclStatus.Builder();
+    builder.owner(p.getUserName()).group(p.getGroupName())
+        .addEntries(aclEntryList).setPermission(permission)
+        .stickyBit(permission.getStickyBit());
+    AclStatus aclStatus = builder.build();
+    return JsonUtil.toJsonString(aclStatus);
   }
 
-  private List<AclEntry> getAclEntryList(String path) {
-    long id = getINodeId(path);
-    FsImageProto.INodeSection.INode inode = inodes.get(id);
+  private List<AclEntry> getAclEntryList(String path) throws IOException {
+    long id = lookup(path);
+    FsImageProto.INodeSection.INode inode = fromINodeId(id);
     switch (inode.getType()) {
       case FILE: {
         FsImageProto.INodeSection.INodeFile f = inode.getFile();
@@ -325,9 +419,9 @@ class FSImageLoader {
     }
   }
 
-  private PermissionStatus getPermissionStatus(String path) {
-    long id = getINodeId(path);
-    FsImageProto.INodeSection.INode inode = inodes.get(id);
+  private PermissionStatus getPermissionStatus(String path) throws IOException {
+    long id = lookup(path);
+    FsImageProto.INodeSection.INode inode = fromINodeId(id);
     switch (inode.getType()) {
       case FILE: {
         FsImageProto.INodeSection.INodeFile f = inode.getFile();
@@ -353,30 +447,41 @@ class FSImageLoader {
   /**
    * Return the INodeId of the specified path.
    */
-  private long getINodeId(String strPath) {
-    if (strPath.equals("/")) {
-      return INodeId.ROOT_INODE_ID;
-    }
-
-    String[] nameList = strPath.split("/");
-    Preconditions.checkArgument(nameList.length > 1,
-                                "Illegal path: " + strPath);
+  private long lookup(String path) throws IOException {
+    Preconditions.checkArgument(path.startsWith("/"));
     long id = INodeId.ROOT_INODE_ID;
-    for (int i = 1; i < nameList.length; i++) {
-      long[] children = dirmap.get(id);
-      Preconditions.checkNotNull(children, "File: " +
-          strPath + " is not found in the fsimage.");
-      String cName = nameList[i];
-      boolean findChildren = false;
+    for (int offset = 0, next; offset < path.length(); offset = next) {
+      next = path.indexOf('/', offset + 1);
+      if (next == -1) {
+        next = path.length();
+      }
+      if (offset + 1 > next) {
+        break;
+      }
+
+      final String component = path.substring(offset + 1, next);
+
+      if (component.isEmpty()) {
+        continue;
+      }
+
+      final long[] children = dirmap.get(id);
+      if (children == null) {
+        throw new FileNotFoundException(path);
+      }
+
+      boolean found = false;
       for (long cid : children) {
-        if (cName.equals(inodes.get(cid).getName().toStringUtf8())) {
-          id = cid;
-          findChildren = true;
+        FsImageProto.INodeSection.INode child = fromINodeId(cid);
+        if (component.equals(child.getName().toStringUtf8())) {
+          found = true;
+          id = child.getId();
           break;
         }
       }
-      Preconditions.checkArgument(findChildren, "File: " +
-          strPath + " is not found in the fsimage.");
+      if (!found) {
+        throw new FileNotFoundException(path);
+      }
     }
     return id;
   }
@@ -449,7 +554,7 @@ class FSImageLoader {
     }
   }
 
-  private long getFileSize(FsImageProto.INodeSection.INodeFile f) {
+  static long getFileSize(FsImageProto.INodeSection.INodeFile f) {
     long size = 0;
     for (HdfsProtos.BlockProto p : f.getBlocksList()) {
       size += p.getNumBytes();
@@ -459,5 +564,24 @@ class FSImageLoader {
 
   private String toString(FsPermission permission) {
     return String.format("%o", permission.toShort());
+  }
+
+  private FsImageProto.INodeSection.INode fromINodeId(final long id)
+          throws IOException {
+    int l = 0, r = inodes.length;
+    while (l < r) {
+      int mid = l + (r - l) / 2;
+      FsImageProto.INodeSection.INode n = FsImageProto.INodeSection.INode
+              .parseFrom(inodes[mid]);
+      long nid = n.getId();
+      if (id > nid) {
+        l = mid + 1;
+      } else if (id < nid) {
+        r = mid;
+      } else {
+        return n;
+      }
+    }
+    return null;
   }
 }

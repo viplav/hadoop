@@ -19,10 +19,18 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import org.apache.hadoop.hdfs.protocol.Block;
-import org.junit.Assert;
 import org.junit.Test;
 
-public class TestUnderReplicatedBlockQueues extends Assert {
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.fail;
+
+public class TestUnderReplicatedBlockQueues {
+
+  private BlockInfo genBlockInfo(long id) {
+    return new BlockInfoContiguous(new Block(id), (short) 3);
+  }
 
   /**
    * Test that adding blocks with different replication counts puts them
@@ -32,10 +40,11 @@ public class TestUnderReplicatedBlockQueues extends Assert {
   @Test
   public void testBlockPriorities() throws Throwable {
     UnderReplicatedBlocks queues = new UnderReplicatedBlocks();
-    Block block1 = new Block(1);
-    Block block2 = new Block(2);
-    Block block_very_under_replicated = new Block(3);
-    Block block_corrupt = new Block(4);
+    BlockInfo block1 = genBlockInfo(1);
+    BlockInfo block2 = genBlockInfo(2);
+    BlockInfo block_very_under_replicated = genBlockInfo(3);
+    BlockInfo block_corrupt = genBlockInfo(4);
+    BlockInfo block_corrupt_repl_one = genBlockInfo(5);
 
     //add a block with a single entry
     assertAdded(queues, block1, 1, 0, 3);
@@ -64,10 +73,20 @@ public class TestUnderReplicatedBlockQueues extends Assert {
     assertInLevel(queues, block_very_under_replicated,
                   UnderReplicatedBlocks.QUEUE_VERY_UNDER_REPLICATED);
 
+    //insert a corrupt block with replication factor 1
+    assertAdded(queues, block_corrupt_repl_one, 0, 0, 1);
+    assertEquals(2, queues.getCorruptBlockSize());
+    assertEquals(1, queues.getCorruptReplOneBlockSize());
+    queues.update(block_corrupt_repl_one, 0, 0, 3, 0, 2);
+    assertEquals(0, queues.getCorruptReplOneBlockSize());
+    queues.update(block_corrupt, 0, 0, 1, 0, -2);
+    assertEquals(1, queues.getCorruptReplOneBlockSize());
+    queues.update(block_very_under_replicated, 0, 0, 1, -4, -24);
+    assertEquals(2, queues.getCorruptReplOneBlockSize());
   }
 
   private void assertAdded(UnderReplicatedBlocks queues,
-                           Block block,
+                           BlockInfo block,
                            int curReplicas,
                            int decomissionedReplicas,
                            int expectedReplicas) {

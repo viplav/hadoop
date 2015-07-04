@@ -20,12 +20,14 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.SecurityUtilTestHelper;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.LogAggregationContext;
@@ -41,37 +43,51 @@ import org.apache.hadoop.yarn.server.resourcemanager.MockNM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContextImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.RMSecretManagerService;
-import org.apache.hadoop.yarn.server.resourcemanager.TestFifoScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.NullRMNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppReport;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+
 
 public class TestContainerAllocation {
 
-  private static final Log LOG = LogFactory.getLog(TestFifoScheduler.class);
+  private static final Log LOG = LogFactory
+      .getLog(TestContainerAllocation.class);
 
   private final int GB = 1024;
 
   private YarnConfiguration conf;
+  
+  RMNodeLabelsManager mgr;
 
   @Before
   public void setUp() throws Exception {
     conf = new YarnConfiguration();
     conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
       ResourceScheduler.class);
+    mgr = new NullRMNodeLabelsManager();
+    mgr.init(conf);
   }
 
   @Test(timeout = 3000000)
   public void testExcessReservationThanNodeManagerCapacity() throws Exception {
+    @SuppressWarnings("resource")
     MockRM rm = new MockRM(conf);
     rm.start();
 
@@ -101,7 +117,7 @@ public class TestContainerAllocation {
     am1.registerAppAttempt();
 
     LOG.info("sending container requests ");
-    am1.addRequests(new String[] {"*"}, 3 * GB, 1, 1);
+    am1.addRequests(new String[] {"*"}, 2 * GB, 1, 1);
     AllocateResponse alloc1Response = am1.schedule(); // send the request
 
     // kick the scheduler
@@ -149,7 +165,7 @@ public class TestContainerAllocation {
     // request a container.
     am1.allocate("127.0.0.1", 1024, 1, new ArrayList<ContainerId>());
     ContainerId containerId2 =
-        ContainerId.newInstance(am1.getApplicationAttemptId(), 2);
+        ContainerId.newContainerId(am1.getApplicationAttemptId(), 2);
     rm1.waitForState(nm1, containerId2, RMContainerState.ALLOCATED);
 
     RMContainer container =
@@ -179,7 +195,7 @@ public class TestContainerAllocation {
     // request a container.
     am1.allocate("127.0.0.1", 1024, 1, new ArrayList<ContainerId>());
     ContainerId containerId2 =
-        ContainerId.newInstance(am1.getApplicationAttemptId(), 2);
+        ContainerId.newContainerId(am1.getApplicationAttemptId(), 2);
     rm1.waitForState(nm1, containerId2, RMContainerState.ALLOCATED);
 
     // acquire the container.
@@ -212,16 +228,20 @@ public class TestContainerAllocation {
       .assertNull(getLogAggregationContextFromContainerToken(rm1, nm1, null));
 
     // create a not-null LogAggregationContext
-    final int interval = 2000;
     LogAggregationContext logAggregationContext =
         LogAggregationContext.newInstance(
-          "includePattern", "excludePattern", interval);
+          "includePattern", "excludePattern",
+          "rolledLogsIncludePattern",
+          "rolledLogsExcludePattern");
     LogAggregationContext returned =
         getLogAggregationContextFromContainerToken(rm1, nm2,
           logAggregationContext);
     Assert.assertEquals("includePattern", returned.getIncludePattern());
     Assert.assertEquals("excludePattern", returned.getExcludePattern());
-    Assert.assertEquals(interval, returned.getRollingIntervalSeconds());
+    Assert.assertEquals("rolledLogsIncludePattern",
+      returned.getRolledLogsIncludePattern());
+    Assert.assertEquals("rolledLogsExcludePattern",
+      returned.getRolledLogsExcludePattern());
     rm1.stop();
   }
 
@@ -234,7 +254,7 @@ public class TestContainerAllocation {
     // request a container.
     am2.allocate("127.0.0.1", 512, 1, new ArrayList<ContainerId>());
     ContainerId containerId =
-        ContainerId.newInstance(am2.getApplicationAttemptId(), 2);
+        ContainerId.newContainerId(am2.getApplicationAttemptId(), 2);
     rm1.waitForState(nm1, containerId, RMContainerState.ALLOCATED);
 
     // acquire the container.
@@ -266,10 +286,11 @@ public class TestContainerAllocation {
         public Token createContainerToken(ContainerId containerId,
             NodeId nodeId, String appSubmitter, Resource capability,
             Priority priority, long createTime,
-            LogAggregationContext logAggregationContext) {
+            LogAggregationContext logAggregationContext, String nodeLabelExp) {
           numRetries++;
           return super.createContainerToken(containerId, nodeId, appSubmitter,
-            capability, priority, createTime, logAggregationContext);
+              capability, priority, createTime, logAggregationContext,
+              nodeLabelExp);
         }
       };
     }
@@ -278,7 +299,7 @@ public class TestContainerAllocation {
   // This is to test fetching AM container will be retried, if AM container is
   // not fetchable since DNS is unavailable causing container token/NMtoken
   // creation failure.
-  @Test(timeout = 20000)
+  @Test(timeout = 30000)
   public void testAMContainerAllocationWhenDNSUnavailable() throws Exception {
     MockRM rm1 = new MockRM(conf) {
       @Override
@@ -304,7 +325,6 @@ public class TestContainerAllocation {
     }
 
     SecurityUtilTestHelper.setTokenServiceUseIp(false);
-    rm1.waitForState(attempt.getAppAttemptId(), RMAppAttemptState.ALLOCATED);
     MockRM.launchAndRegisterAM(app1, rm1, nm1);
   }
 }

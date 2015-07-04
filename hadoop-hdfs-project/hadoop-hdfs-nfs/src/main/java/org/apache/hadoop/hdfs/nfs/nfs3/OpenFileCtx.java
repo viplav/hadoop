@@ -38,11 +38,11 @@ import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.nfs.conf.NfsConfigKeys;
+import org.apache.hadoop.hdfs.nfs.conf.NfsConfiguration;
 import org.apache.hadoop.hdfs.nfs.nfs3.WriteCtx.DataState;
 import org.apache.hadoop.io.BytesWritable.Comparator;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.nfs.nfs3.FileHandle;
-import org.apache.hadoop.nfs.nfs3.IdUserGroup;
 import org.apache.hadoop.nfs.nfs3.Nfs3Constant;
 import org.apache.hadoop.nfs.nfs3.Nfs3Constant.WriteStableHow;
 import org.apache.hadoop.nfs.nfs3.Nfs3FileAttributes;
@@ -54,6 +54,7 @@ import org.apache.hadoop.nfs.nfs3.response.WccAttr;
 import org.apache.hadoop.nfs.nfs3.response.WccData;
 import org.apache.hadoop.oncrpc.XDR;
 import org.apache.hadoop.oncrpc.security.VerifierNone;
+import org.apache.hadoop.security.IdMappingServiceProvider;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.Time;
 import org.jboss.netty.channel.Channel;
@@ -77,11 +78,30 @@ class OpenFileCtx {
     COMMIT_INACTIVE_CTX,
     COMMIT_INACTIVE_WITH_PENDING_WRITE,
     COMMIT_ERROR,
-    COMMIT_DO_SYNC;
+    COMMIT_DO_SYNC,
+    /**
+     * Deferred COMMIT response could fail file uploading. The following two
+     * status are introduced as a solution. 1. if client asks to commit
+     * non-sequential trunk of data, NFS gateway return success with the hope
+     * that client will send the prerequisite writes. 2. if client asks to
+     * commit a sequential trunk(means it can be flushed to HDFS), NFS gateway
+     * return a special error NFS3ERR_JUKEBOX indicating the client needs to
+     * retry. Meanwhile, NFS gateway keeps flush data to HDFS and do sync
+     * eventually.
+     * 
+     * The reason to let client wait is that, we want the client to wait for the
+     * last commit. Otherwise, client thinks file upload finished (e.g., cp
+     * command returns success) but NFS could be still flushing staged data to
+     * HDFS. However, we don't know which one is the last commit. We make the
+     * assumption that a commit after sequential writes may be the last.
+     * Referring HDFS-7259 for more details.
+     * */
+    COMMIT_SPECIAL_WAIT, // scoped pending writes is sequential
+    COMMIT_SPECIAL_SUCCESS;// scoped pending writes is not sequential 
   }
 
   private final DFSClient client;
-  private final IdUserGroup iug;
+  private final IdMappingServiceProvider iug;
   
   // The stream status. False means the stream is closed.
   private volatile boolean activeState;
@@ -109,9 +129,8 @@ class OpenFileCtx {
     private final Channel channel;
     private final int xid;
     private final Nfs3FileAttributes preOpAttr;
-
-    // Remember time for debug purpose
-    private final long startTime;
+    
+    public final long startTime;
 
     long getOffset() {
       return offset;
@@ -139,7 +158,7 @@ class OpenFileCtx {
       this.channel = channel;
       this.xid = xid;
       this.preOpAttr = preOpAttr;
-      this.startTime = Time.monotonicNow();
+      this.startTime = System.nanoTime();
     }
 
     @Override
@@ -155,10 +174,14 @@ class OpenFileCtx {
   
   private volatile boolean enabledDump;
   private FileOutputStream dumpOut;
+  
+  /** Tracks the data buffered in memory related to non sequential writes */
   private AtomicLong nonSequentialWriteInMemory;
+  
   private RandomAccessFile raf;
   private final String dumpFilePath;
   private Daemon dumpThread;
+  private final boolean uploadLargeFile;
   
   private void updateLastAccessTime() {
     lastAccessTime = Time.monotonicNow();
@@ -184,28 +207,29 @@ class OpenFileCtx {
     return (pendingWrites.size() != 0 || pendingCommits.size() != 0);
   }
   
-  // Increase or decrease the memory occupation of non-sequential writes
+  /** Increase or decrease the memory occupation of non-sequential writes */
   private long updateNonSequentialWriteInMemory(long count) {
     long newValue = nonSequentialWriteInMemory.addAndGet(count);
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Update nonSequentialWriteInMemory by " + count + " new value:"
+      LOG.debug("Update nonSequentialWriteInMemory by " + count + " new value: "
           + newValue);
     }
 
     Preconditions.checkState(newValue >= 0,
-        "nonSequentialWriteInMemory is negative after update with count "
-            + count);
+        "nonSequentialWriteInMemory is negative " + newValue
+            + " after update with count " + count);
     return newValue;
   }
   
   OpenFileCtx(HdfsDataOutputStream fos, Nfs3FileAttributes latestAttr,
-      String dumpFilePath, DFSClient client, IdUserGroup iug) {
-    this(fos, latestAttr, dumpFilePath, client, iug, false);
+      String dumpFilePath, DFSClient client, IdMappingServiceProvider iug) {
+    this(fos, latestAttr, dumpFilePath, client, iug, false,
+        new NfsConfiguration());
   }
   
   OpenFileCtx(HdfsDataOutputStream fos, Nfs3FileAttributes latestAttr,
-      String dumpFilePath, DFSClient client, IdUserGroup iug,
-      boolean aixCompatMode) {
+      String dumpFilePath, DFSClient client, IdMappingServiceProvider iug,
+      boolean aixCompatMode, NfsConfiguration config) {
     this.fos = fos;
     this.latestAttr = latestAttr;
     this.aixCompatMode = aixCompatMode;
@@ -226,13 +250,15 @@ class OpenFileCtx {
     nonSequentialWriteInMemory = new AtomicLong(0);
   
     this.dumpFilePath = dumpFilePath;  
-    enabledDump = dumpFilePath == null ? false: true;
+    enabledDump = dumpFilePath != null;
     nextOffset = new AtomicLong();
     nextOffset.set(latestAttr.getSize());
     assert(nextOffset.get() == this.fos.getPos());
     dumpThread = null;
     this.client = client;
     this.iug = iug;
+    this.uploadLargeFile = config.getBoolean(NfsConfigKeys.LARGE_FILE_UPLOAD,
+        NfsConfigKeys.LARGE_FILE_UPLOAD_DEFAULT);
   }
 
   public Nfs3FileAttributes getLatestAttr() {
@@ -245,7 +271,7 @@ class OpenFileCtx {
   }
   
   // Check if need to dump the new writes
-  private void checkDump() {
+  private void waitForDump() {
     if (!enabledDump) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Do nothing, dump is disabled.");
@@ -270,6 +296,14 @@ class OpenFileCtx {
           this.notifyAll();          
         }
       }
+      
+      while (nonSequentialWriteInMemory.get() >= DUMP_WRITE_WATER_MARK) {
+        try {
+          this.wait();
+        } catch (InterruptedException ignored) {
+        }
+      }
+
     }
   }
 
@@ -278,7 +312,7 @@ class OpenFileCtx {
     private void dump() {
       // Create dump outputstream for the first time
       if (dumpOut == null) {
-        LOG.info("Create dump file:" + dumpFilePath);
+        LOG.info("Create dump file: " + dumpFilePath);
         File dumpFile = new File(dumpFilePath);
         try {
           synchronized (this) {
@@ -333,8 +367,8 @@ class OpenFileCtx {
             updateNonSequentialWriteInMemory(-dumpedDataSize);
           }
         } catch (IOException e) {
-          LOG.error("Dump data failed:" + writeCtx + " with error:" + e
-              + " OpenFileCtx state:" + activeState);
+          LOG.error("Dump data failed: " + writeCtx + " with error: " + e
+              + " OpenFileCtx state: " + activeState);
           // Disable dump
           enabledDump = false;
           return;
@@ -356,6 +390,7 @@ class OpenFileCtx {
           }
           synchronized (OpenFileCtx.this) {
             if (nonSequentialWriteInMemory.get() < DUMP_WRITE_WATER_MARK) {
+              OpenFileCtx.this.notifyAll();
               try {
                 OpenFileCtx.this.wait();
                 if (LOG.isDebugEnabled()) {
@@ -372,8 +407,13 @@ class OpenFileCtx {
                 + " enabledDump: " + enabledDump);
           }
         } catch (Throwable t) {
+          // unblock threads with new request
+          synchronized (OpenFileCtx.this) {
+            OpenFileCtx.this.notifyAll();
+          }
           LOG.info("Dumper get Throwable: " + t + ". dumpFilePath: "
               + OpenFileCtx.this.dumpFilePath, t);
+          activeState = false;
         }
       }
     }
@@ -388,8 +428,8 @@ class OpenFileCtx {
       return null;
     } else {
       if (xid != writeCtx.getXid()) {
-        LOG.warn("Got a repeated request, same range, with a different xid:"
-            + xid + " xid in old request:" + writeCtx.getXid());
+        LOG.warn("Got a repeated request, same range, with a different xid: "
+            + xid + " xid in old request: " + writeCtx.getXid());
         //TODO: better handling.
       }
       return writeCtx;  
@@ -398,16 +438,16 @@ class OpenFileCtx {
   
   public void receivedNewWrite(DFSClient dfsClient, WRITE3Request request,
       Channel channel, int xid, AsyncDataService asyncDataService,
-      IdUserGroup iug) {
+      IdMappingServiceProvider iug) {
     
     if (!activeState) {
-      LOG.info("OpenFileCtx is inactive, fileId:"
+      LOG.info("OpenFileCtx is inactive, fileId: "
           + request.getHandle().getFileId());
       WccData fileWcc = new WccData(latestAttr.getWccAttr(), latestAttr);
       WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3ERR_IO,
           fileWcc, 0, request.getStableHow(), Nfs3Constant.WRITE_COMMIT_VERF);
       Nfs3Utils.writeChannel(channel,
-          response.writeHeaderAndResponse(new XDR(), xid, new VerifierNone()),
+          response.serialize(new XDR(), xid, new VerifierNone()),
           xid);
     } else {
       // Update the write time first
@@ -433,7 +473,7 @@ class OpenFileCtx {
           WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3_OK,
               fileWcc, request.getCount(), request.getStableHow(),
               Nfs3Constant.WRITE_COMMIT_VERF);
-          Nfs3Utils.writeChannel(channel, response.writeHeaderAndResponse(
+          Nfs3Utils.writeChannel(channel, response.serialize(
               new XDR(), xid, new VerifierNone()), xid);
         }
       } else {
@@ -483,7 +523,7 @@ class OpenFileCtx {
     int originalCount = WriteCtx.INVALID_ORIGINAL_COUNT;
     
     if (LOG.isDebugEnabled()) {
-      LOG.debug("requesed offset=" + offset + " and current offset="
+      LOG.debug("requested offset=" + offset + " and current offset="
           + cachedOffset);
     }
 
@@ -516,7 +556,7 @@ class OpenFileCtx {
     
     // Fail non-append call
     if (offset < cachedOffset) {
-      LOG.warn("(offset,count,nextOffset):" + "(" + offset + "," + count + ","
+      LOG.warn("(offset,count,nextOffset): " + "(" + offset + "," + count + ","
           + nextOffset + ")");
       return null;
     } else {
@@ -528,7 +568,7 @@ class OpenFileCtx {
           dataState);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Add new write to the list with nextOffset " + cachedOffset
-            + " and requesed offset=" + offset);
+            + " and requested offset=" + offset);
       }
       if (writeCtx.getDataState() == WriteCtx.DataState.ALLOW_DUMP) {
         // update the memory size
@@ -537,10 +577,15 @@ class OpenFileCtx {
       // check if there is a WriteCtx with the same range in pendingWrites
       WriteCtx oldWriteCtx = checkRepeatedWriteRequest(request, channel, xid);
       if (oldWriteCtx == null) {
-        addWrite(writeCtx);
+        pendingWrites.put(new OffsetRange(offset, offset + count), writeCtx);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("New write buffered with xid " + xid + " nextOffset "
+              + cachedOffset + " req offset=" + offset + " mapsize="
+              + pendingWrites.size());
+        }
       } else {
-        LOG.warn("Got a repeated request, same range, with xid:"
-            + writeCtx.getXid());
+        LOG.warn("Got a repeated request, same range, with xid: " + xid
+            + " nextOffset " + +cachedOffset + " req offset=" + offset);
       }
       return writeCtx;
     }
@@ -548,7 +593,7 @@ class OpenFileCtx {
   
   /** Process an overwrite write request */
   private void processOverWrite(DFSClient dfsClient, WRITE3Request request,
-      Channel channel, int xid, IdUserGroup iug) {
+      Channel channel, int xid, IdMappingServiceProvider iug) {
     WccData wccData = new WccData(latestAttr.getWccAttr(), null);
     long offset = request.getOffset();
     int count = request.getCount();
@@ -570,7 +615,7 @@ class OpenFileCtx {
     }
     updateLastAccessTime();
     Nfs3Utils.writeChannel(channel,
-        response.writeHeaderAndResponse(new XDR(), xid, new VerifierNone()),
+        response.serialize(new XDR(), xid, new VerifierNone()),
         xid);
   }
   
@@ -607,7 +652,7 @@ class OpenFileCtx {
 
   private void receivedNewWriteInternal(DFSClient dfsClient,
       WRITE3Request request, Channel channel, int xid,
-      AsyncDataService asyncDataService, IdUserGroup iug) {
+      AsyncDataService asyncDataService, IdMappingServiceProvider iug) {
     WriteStableHow stableHow = request.getStableHow();
     WccAttr preOpAttr = latestAttr.getWccAttr();
     int count = request.getCount();
@@ -617,19 +662,19 @@ class OpenFileCtx {
       // offset < nextOffset
       processOverWrite(dfsClient, request, channel, xid, iug);
     } else {
-      // The writes is added to pendingWrites.
+      // The write is added to pendingWrites.
       // Check and start writing back if necessary
       boolean startWriting = checkAndStartWrite(asyncDataService, writeCtx);
       if (!startWriting) {
         // offset > nextOffset. check if we need to dump data
-        checkDump();
+        waitForDump();
         
         // In test, noticed some Linux client sends a batch (e.g., 1MB)
         // of reordered writes and won't send more writes until it gets
         // responses of the previous batch. So here send response immediately
         // for unstable non-sequential write
         if (stableHow != WriteStableHow.UNSTABLE) {
-          LOG.info("Have to change stable write to unstable write:"
+          LOG.info("Have to change stable write to unstable write: "
               + request.getStableHow());
           stableHow = WriteStableHow.UNSTABLE;
         }
@@ -641,8 +686,10 @@ class OpenFileCtx {
         WccData fileWcc = new WccData(preOpAttr, latestAttr);
         WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3_OK,
             fileWcc, count, stableHow, Nfs3Constant.WRITE_COMMIT_VERF);
+        RpcProgramNfs3.metrics.addWrite(Nfs3Utils
+            .getElapsedTime(writeCtx.startTime));
         Nfs3Utils
-            .writeChannel(channel, response.writeHeaderAndResponse(new XDR(),
+            .writeChannel(channel, response.serialize(new XDR(),
                 xid, new VerifierNone()), xid);
         writeCtx.setReplied(true);
       }
@@ -656,8 +703,8 @@ class OpenFileCtx {
    */
   private WRITE3Response processPerfectOverWrite(DFSClient dfsClient,
       long offset, int count, WriteStableHow stableHow, byte[] data,
-      String path, WccData wccData, IdUserGroup iug) {
-    WRITE3Response response = null;
+      String path, WccData wccData, IdMappingServiceProvider iug) {
+    WRITE3Response response;
 
     // Read the content back
     byte[] readbuffer = new byte[count];
@@ -672,7 +719,7 @@ class OpenFileCtx {
           + "Continue processing the perfect overwrite.");
     } catch (IOException e) {
       LOG.info("hsync failed when processing possible perfect overwrite, path="
-          + path + " error:" + e);
+          + path + " error: " + e);
       return new WRITE3Response(Nfs3Status.NFS3ERR_IO, wccData, 0, stableHow,
           Nfs3Constant.WRITE_COMMIT_VERF);
     }
@@ -681,7 +728,7 @@ class OpenFileCtx {
       fis = dfsClient.createWrappedInputStream(dfsClient.open(path));
       readCount = fis.read(offset, readbuffer, 0, count);
       if (readCount < count) {
-        LOG.error("Can't read back " + count + " bytes, partial read size:"
+        LOG.error("Can't read back " + count + " bytes, partial read size: "
             + readCount);
         return new WRITE3Response(Nfs3Status.NFS3ERR_IO, wccData, 0, stableHow,
             Nfs3Constant.WRITE_COMMIT_VERF);
@@ -710,7 +757,7 @@ class OpenFileCtx {
         postOpAttr = Nfs3Utils.getFileAttr(dfsClient, path, iug);
       } catch (IOException e) {
         LOG.info("Got error when processing perfect overwrite, path=" + path
-            + " error:" + e);
+            + " error: " + e);
         return new WRITE3Response(Nfs3Status.NFS3ERR_IO, wccData, 0, stableHow,
             Nfs3Constant.WRITE_COMMIT_VERF);
       }
@@ -761,13 +808,49 @@ class OpenFileCtx {
           ret = COMMIT_STATUS.COMMIT_ERROR;
         }
       } catch (IOException e) {
-        LOG.error("Got stream error during data sync:" + e);
+        LOG.error("Got stream error during data sync: " + e);
         // Do nothing. Stream will be closed eventually by StreamMonitor.
         // status = Nfs3Status.NFS3ERR_IO;
         ret = COMMIT_STATUS.COMMIT_ERROR;
       }
     }
     return ret;
+  }
+  
+  // Check if the to-commit range is sequential
+  @VisibleForTesting
+  synchronized boolean checkSequential(final long commitOffset,
+      final long nextOffset) {
+    Preconditions.checkState(commitOffset >= nextOffset, "commitOffset "
+        + commitOffset + " less than nextOffset " + nextOffset);
+    long offset = nextOffset;
+    Iterator<OffsetRange> it = pendingWrites.descendingKeySet().iterator();
+    while (it.hasNext()) {
+      OffsetRange range = it.next();
+      if (range.getMin() != offset) {
+        // got a hole
+        return false;
+      }
+      offset = range.getMax();
+      if (offset > commitOffset) {
+        return true;
+      }
+    }
+    // there is gap between the last pending write and commitOffset
+    return false;
+  }
+
+  private COMMIT_STATUS handleSpecialWait(boolean fromRead, long commitOffset,
+      Channel channel, int xid, Nfs3FileAttributes preOpAttr) {
+    if (!fromRead) {
+      // let client retry the same request, add pending commit to sync later
+      CommitCtx commitCtx = new CommitCtx(commitOffset, channel, xid, preOpAttr);
+      pendingCommits.put(commitOffset, commitCtx);
+    }
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("return COMMIT_SPECIAL_WAIT");
+    }
+    return COMMIT_STATUS.COMMIT_SPECIAL_WAIT;
   }
   
   @VisibleForTesting
@@ -781,12 +864,59 @@ class OpenFileCtx {
         return COMMIT_STATUS.COMMIT_INACTIVE_WITH_PENDING_WRITE;
       }
     }
-
+    
     long flushed = getFlushedOffset();
     if (LOG.isDebugEnabled()) {
-      LOG.debug("getFlushedOffset=" + flushed + " commitOffset=" + commitOffset);
+      LOG.debug("getFlushedOffset=" + flushed + " commitOffset=" + commitOffset
+          + "nextOffset=" + nextOffset.get());
     }
+    
+    if (pendingWrites.isEmpty()) {
+      if (aixCompatMode) {
+        // Note that, there is no guarantee data is synced. Caller should still
+        // do a sync here though the output stream might be closed.
+        return COMMIT_STATUS.COMMIT_FINISHED;
+      } else {
+        if (flushed < nextOffset.get()) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("get commit while still writing to the requested offset,"
+                + " with empty queue");
+          }
+          return handleSpecialWait(fromRead, nextOffset.get(), channel, xid,
+              preOpAttr);
+        } else {
+          return COMMIT_STATUS.COMMIT_FINISHED;
+        }
+      }
+    }
+    
+    Preconditions.checkState(flushed <= nextOffset.get(), "flushed " + flushed
+        + " is larger than nextOffset " + nextOffset.get());
+    // Handle large file upload
+    if (uploadLargeFile && !aixCompatMode) {
+      long co = (commitOffset > 0) ? commitOffset : pendingWrites.firstEntry()
+          .getKey().getMax() - 1;
 
+      if (co <= flushed) {
+        return COMMIT_STATUS.COMMIT_DO_SYNC;
+      } else if (co < nextOffset.get()) {
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("get commit while still writing to the requested offset");
+        }
+        return handleSpecialWait(fromRead, co, channel, xid, preOpAttr);
+      } else {
+        // co >= nextOffset
+        if (checkSequential(co, nextOffset.get())) {
+          return handleSpecialWait(fromRead, co, channel, xid, preOpAttr);
+        } else {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("return COMMIT_SPECIAL_SUCCESS");
+          }
+          return COMMIT_STATUS.COMMIT_SPECIAL_SUCCESS;
+        }
+      }
+    }
+    
     if (commitOffset > 0) {
       if (aixCompatMode) {
         // The AIX NFS client misinterprets RFC-1813 and will always send 4096
@@ -817,27 +947,14 @@ class OpenFileCtx {
     Entry<OffsetRange, WriteCtx> key = pendingWrites.firstEntry();
 
     // Commit whole file, commitOffset == 0
-    if (pendingWrites.isEmpty()) {
-      // Note that, there is no guarantee data is synced. TODO: We could still
-      // do a sync here though the output stream might be closed.
-      return COMMIT_STATUS.COMMIT_FINISHED;
-    } else {
-      if (!fromRead) {
-        // Insert commit
-        long maxOffset = key.getKey().getMax() - 1;
-        Preconditions.checkState(maxOffset > 0);
-        CommitCtx commitCtx = new CommitCtx(maxOffset, channel, xid, preOpAttr);
-        pendingCommits.put(maxOffset, commitCtx);
-      }
-      return COMMIT_STATUS.COMMIT_WAIT;
+    if (!fromRead) {
+      // Insert commit
+      long maxOffset = key.getKey().getMax() - 1;
+      Preconditions.checkState(maxOffset > 0);
+      CommitCtx commitCtx = new CommitCtx(maxOffset, channel, xid, preOpAttr);
+      pendingCommits.put(maxOffset, commitCtx);
     }
-  }
-  
-  private void addWrite(WriteCtx writeCtx) {
-    long offset = writeCtx.getOffset();
-    int count = writeCtx.getCount();
-    // For the offset range (min, max), min is inclusive, and max is exclusive
-    pendingWrites.put(new OffsetRange(offset, offset + count), writeCtx);
+    return COMMIT_STATUS.COMMIT_WAIT;
   }
   
   /**
@@ -855,7 +972,7 @@ class OpenFileCtx {
     // Check the stream timeout
     if (checkStreamTimeout(streamTimeout)) {
       if (LOG.isDebugEnabled()) {
-        LOG.debug("stream can be closed for fileId:" + fileId);
+        LOG.debug("stream can be closed for fileId: " + fileId);
       }
       flag = true;
     }
@@ -871,7 +988,7 @@ class OpenFileCtx {
   private synchronized WriteCtx offerNextToWrite() {
     if (pendingWrites.isEmpty()) {
       if (LOG.isDebugEnabled()) {
-        LOG.debug("The asyn write task has no pending writes, fileId: "
+        LOG.debug("The async write task has no pending writes, fileId: "
             + latestAttr.getFileId());
       }
       // process pending commit again to handle this race: a commit is added
@@ -904,7 +1021,7 @@ class OpenFileCtx {
         this.asyncStatus = false;
       } else if (range.getMin() < offset && range.getMax() > offset) {
         // shouldn't happen since we do sync for overlapped concurrent writers
-        LOG.warn("Got a overlapping write (" + range.getMin() + ","
+        LOG.warn("Got an overlapping write (" + range.getMin() + ", "
             + range.getMax() + "), nextOffset=" + offset
             + ". Silently drop it now");
         pendingWrites.remove(range);
@@ -927,10 +1044,10 @@ class OpenFileCtx {
     return null;
   }
   
-  /** Invoked by AsynDataService to write back to HDFS */
+  /** Invoked by AsyncDataService to write back to HDFS */
   void executeWriteBack() {
     Preconditions.checkState(asyncStatus,
-        "openFileCtx has false asyncStatus, fileId:" + latestAttr.getFileId());
+        "openFileCtx has false asyncStatus, fileId: " + latestAttr.getFileId());
     final long startOffset = asyncWriteBackStartOffset;  
     try {
       while (activeState) {
@@ -955,10 +1072,10 @@ class OpenFileCtx {
         if (startOffset == asyncWriteBackStartOffset) {
           asyncStatus = false;
         } else {
-          LOG.info("Another asyn task is already started before this one"
-              + " is finalized. fileId:" + latestAttr.getFileId()
-              + " asyncStatus:" + asyncStatus + " original startOffset:"
-              + startOffset + " new startOffset:" + asyncWriteBackStartOffset
+          LOG.info("Another async task is already started before this one"
+              + " is finalized. fileId: " + latestAttr.getFileId()
+              + " asyncStatus: " + asyncStatus + " original startOffset: "
+              + startOffset + " new startOffset: " + asyncWriteBackStartOffset
               + ". Won't change asyncStatus here.");
         }
       }
@@ -987,7 +1104,7 @@ class OpenFileCtx {
       }
       status = Nfs3Status.NFS3ERR_IO;
     } catch (IOException e) {
-      LOG.error("Got stream error during data sync:", e);
+      LOG.error("Got stream error during data sync: ", e);
       // Do nothing. Stream will be closed eventually by StreamMonitor.
       status = Nfs3Status.NFS3ERR_IO;
     }
@@ -1015,14 +1132,16 @@ class OpenFileCtx {
 
       COMMIT3Response response = new COMMIT3Response(status, wccData,
           Nfs3Constant.WRITE_COMMIT_VERF);
+      RpcProgramNfs3.metrics.addCommit(Nfs3Utils
+          .getElapsedTime(commit.startTime));
       Nfs3Utils.writeChannelCommit(commit.getChannel(), response
-          .writeHeaderAndResponse(new XDR(), commit.getXid(),
+          .serialize(new XDR(), commit.getXid(),
               new VerifierNone()), commit.getXid());
       
       if (LOG.isDebugEnabled()) {
-        LOG.debug("FileId: " + latestAttr.getFileId() + " Service time:"
-            + (Time.monotonicNow() - commit.getStartTime())
-            + "ms. Sent response for commit:" + commit);
+        LOG.debug("FileId: " + latestAttr.getFileId() + " Service time: "
+            + Nfs3Utils.getElapsedTime(commit.startTime)
+            + "ns. Sent response for commit: " + commit);
       }
       entry = pendingCommits.firstEntry();
     }
@@ -1039,13 +1158,14 @@ class OpenFileCtx {
     FileHandle handle = writeCtx.getHandle();
     if (LOG.isDebugEnabled()) {
       LOG.debug("do write, fileId: " + handle.getFileId() + " offset: "
-          + offset + " length:" + count + " stableHow:" + stableHow.name());
+          + offset + " length: " + count + " stableHow: " + stableHow.name());
     }
 
     try {
       // The write is not protected by lock. asyncState is used to make sure
       // there is one thread doing write back at any time    
       writeCtx.writeData(fos);
+      RpcProgramNfs3.metrics.incrBytesWritten(writeCtx.getCount());
       
       long flushedOffset = getFlushedOffset();
       if (flushedOffset != (offset + count)) {
@@ -1063,7 +1183,7 @@ class OpenFileCtx {
             updateNonSequentialWriteInMemory(-count);
             if (LOG.isDebugEnabled()) {
               LOG.debug("After writing " + handle.getFileId() + " at offset "
-                  + offset + ", updated the memory count, new value:"
+                  + offset + ", updated the memory count, new value: "
                   + nonSequentialWriteInMemory.get());
             }
           }
@@ -1072,18 +1192,18 @@ class OpenFileCtx {
       
       if (!writeCtx.getReplied()) {
         if (stableHow != WriteStableHow.UNSTABLE) {
-          LOG.info("Do sync for stable write:" + writeCtx);
+          LOG.info("Do sync for stable write: " + writeCtx);
           try {
             if (stableHow == WriteStableHow.DATA_SYNC) {
               fos.hsync();
             } else {
               Preconditions.checkState(stableHow == WriteStableHow.FILE_SYNC,
-                  "Unknown WriteStableHow:" + stableHow);
+                  "Unknown WriteStableHow: " + stableHow);
               // Sync file data and length
               fos.hsync(EnumSet.of(SyncFlag.UPDATE_LENGTH));
             }
           } catch (IOException e) {
-            LOG.error("hsync failed with writeCtx:" + writeCtx, e);
+            LOG.error("hsync failed with writeCtx: " + writeCtx, e);
             throw e;
           }
         }
@@ -1091,13 +1211,14 @@ class OpenFileCtx {
         WccAttr preOpAttr = latestAttr.getWccAttr();
         WccData fileWcc = new WccData(preOpAttr, latestAttr);
         if (writeCtx.getOriginalCount() != WriteCtx.INVALID_ORIGINAL_COUNT) {
-          LOG.warn("Return original count:" + writeCtx.getOriginalCount()
-              + " instead of real data count:" + count);
+          LOG.warn("Return original count: " + writeCtx.getOriginalCount()
+              + " instead of real data count: " + count);
           count = writeCtx.getOriginalCount();
         }
         WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3_OK,
             fileWcc, count, stableHow, Nfs3Constant.WRITE_COMMIT_VERF);
-        Nfs3Utils.writeChannel(channel, response.writeHeaderAndResponse(
+        RpcProgramNfs3.metrics.addWrite(Nfs3Utils.getElapsedTime(writeCtx.startTime));
+        Nfs3Utils.writeChannel(channel, response.serialize(
             new XDR(), xid, new VerifierNone()), xid);
       }
       
@@ -1109,7 +1230,7 @@ class OpenFileCtx {
           + offset + " and length " + count, e);
       if (!writeCtx.getReplied()) {
         WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3ERR_IO);
-        Nfs3Utils.writeChannel(channel, response.writeHeaderAndResponse(
+        Nfs3Utils.writeChannel(channel, response.serialize(
             new XDR(), xid, new VerifierNone()), xid);
         // Keep stream open. Either client retries or SteamMonitor closes it.
       }
@@ -1132,7 +1253,7 @@ class OpenFileCtx {
       dumpThread.interrupt();
       try {
         dumpThread.join(3000);
-      } catch (InterruptedException e) {
+      } catch (InterruptedException ignored) {
       }
     }
     
@@ -1142,8 +1263,8 @@ class OpenFileCtx {
         fos.close();
       }
     } catch (IOException e) {
-      LOG.info("Can't close stream for fileId:" + latestAttr.getFileId()
-          + ", error:" + e);
+      LOG.info("Can't close stream for fileId: " + latestAttr.getFileId()
+          + ", error: " + e);
     }
     
     // Reply error for pending writes
@@ -1151,7 +1272,7 @@ class OpenFileCtx {
     WccAttr preOpAttr = latestAttr.getWccAttr();
     while (!pendingWrites.isEmpty()) {
       OffsetRange key = pendingWrites.firstKey();
-      LOG.info("Fail pending write: (" + key.getMin() + "," + key.getMax()
+      LOG.info("Fail pending write: (" + key.getMin() + ", " + key.getMax()
           + "), nextOffset=" + nextOffset.get());
       
       WriteCtx writeCtx = pendingWrites.remove(key);
@@ -1160,7 +1281,7 @@ class OpenFileCtx {
         WRITE3Response response = new WRITE3Response(Nfs3Status.NFS3ERR_IO,
             fileWcc, 0, writeCtx.getStableHow(), Nfs3Constant.WRITE_COMMIT_VERF);
         Nfs3Utils.writeChannel(writeCtx.getChannel(), response
-            .writeHeaderAndResponse(new XDR(), writeCtx.getXid(),
+            .serialize(new XDR(), writeCtx.getXid(),
                 new VerifierNone()), writeCtx.getXid());
       }
     }

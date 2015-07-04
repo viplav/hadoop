@@ -181,7 +181,38 @@ done:
 int64_t hdfsReadStatisticsGetRemoteBytesRead(
                             const struct hdfsReadStatistics *stats)
 {
-  return stats->totalBytesRead - stats->totalLocalBytesRead;
+    return stats->totalBytesRead - stats->totalLocalBytesRead;
+}
+
+int hdfsFileClearReadStatistics(hdfsFile file)
+{
+    jthrowable jthr;
+    int ret;
+    JNIEnv* env = getJNIEnv();
+
+    if (env == NULL) {
+        errno = EINTERNAL;
+        return EINTERNAL;
+    }
+    if (file->type != HDFS_STREAM_INPUT) {
+        ret = EINVAL;
+        goto done;
+    }
+    jthr = invokeMethod(env, NULL, INSTANCE, file->file,
+                  "org/apache/hadoop/hdfs/client/HdfsDataInputStream",
+                  "clearReadStatistics", "()V");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsFileClearReadStatistics: clearReadStatistics failed");
+        goto done;
+    }
+    ret = 0;
+done:
+    if (ret) {
+        errno = ret;
+        return ret;
+    }
+    return 0;
 }
 
 void hdfsFileFreeReadStatistics(struct hdfsReadStatistics *stats)
@@ -1004,6 +1035,71 @@ done:
         return NULL;
     }
     return file;
+}
+
+int hdfsTruncateFile(hdfsFS fs, const char* path, tOffset newlength)
+{
+    jobject jFS = (jobject)fs;
+    jthrowable jthr;
+    jvalue jVal;
+    jobject jPath = NULL;
+
+    JNIEnv *env = getJNIEnv();
+
+    if (!env) {
+        errno = EINTERNAL;
+        return -1;
+    }
+
+    /* Create an object of org.apache.hadoop.fs.Path */
+    jthr = constructNewObjectOfPath(env, path, &jPath);
+    if (jthr) {
+        errno = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsTruncateFile(%s): constructNewObjectOfPath", path);
+        return -1;
+    }
+
+    jthr = invokeMethod(env, &jVal, INSTANCE, jFS, HADOOP_FS,
+                        "truncate", JMETHOD2(JPARAM(HADOOP_PATH), "J", "Z"),
+                        jPath, newlength);
+    destroyLocalReference(env, jPath);
+    if (jthr) {
+        errno = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsTruncateFile(%s): FileSystem#truncate", path);
+        return -1;
+    }
+    if (jVal.z == JNI_TRUE) {
+        return 1;
+    }
+    return 0;
+}
+
+int hdfsUnbufferFile(hdfsFile file)
+{
+    int ret;
+    jthrowable jthr;
+    JNIEnv *env = getJNIEnv();
+
+    if (!env) {
+        ret = EINTERNAL;
+        goto done;
+    }
+    if (file->type != HDFS_STREAM_INPUT) {
+        ret = ENOTSUP;
+        goto done;
+    }
+    jthr = invokeMethod(env, NULL, INSTANCE, file->file, HADOOP_ISTRM,
+                     "unbuffer", "()V");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+                HADOOP_ISTRM "#unbuffer failed:");
+        goto done;
+    }
+    ret = 0;
+
+done:
+    errno = ret;
+    return ret;
 }
 
 int hdfsCloseFile(hdfsFS fs, hdfsFile file)
@@ -3161,6 +3257,7 @@ done:
         return NULL;
     }
     *numEntries = jPathListSize;
+    errno = 0;
     return pathList;
 }
 

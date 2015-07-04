@@ -452,7 +452,15 @@ public class ViewFs extends AbstractFileSystem {
     return res.targetFileSystem.open(res.remainingPath, bufferSize);
   }
 
-  
+  @Override
+  public boolean truncate(final Path f, final long newLength)
+      throws AccessControlException, FileNotFoundException,
+      UnresolvedLinkException, IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(f), true);
+    return res.targetFileSystem.truncate(res.remainingPath, newLength);
+  }
+
   @Override
   public void renameInternal(final Path src, final Path dst,
       final boolean overwrite) throws IOException, UnresolvedLinkException {
@@ -613,7 +621,8 @@ public class ViewFs extends AbstractFileSystem {
 
   @Override
   public boolean isValidName(String src) {
-    // Prefix validated at mount time and rest of path validated by mount target.
+    // Prefix validated at mount time and rest of path validated by mount
+    // target.
     return true;
   }
 
@@ -706,8 +715,39 @@ public class ViewFs extends AbstractFileSystem {
         fsState.resolve(getUriPath(path), true);
     res.targetFileSystem.removeXAttr(res.remainingPath, name);
   }
-  
-  
+
+  @Override
+  public Path createSnapshot(Path path, String snapshotName)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res = fsState.resolve(
+        getUriPath(path), true);
+    return res.targetFileSystem.createSnapshot(res.remainingPath, snapshotName);
+  }
+
+  @Override
+  public void renameSnapshot(Path path, String snapshotOldName,
+      String snapshotNewName) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res = fsState.resolve(
+        getUriPath(path), true);
+    res.targetFileSystem.renameSnapshot(res.remainingPath, snapshotOldName,
+        snapshotNewName);
+  }
+
+  @Override
+  public void deleteSnapshot(Path path, String snapshotName) throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res = fsState.resolve(
+        getUriPath(path), true);
+    res.targetFileSystem.deleteSnapshot(res.remainingPath, snapshotName);
+  }
+
+  @Override
+  public void setStoragePolicy(final Path path, final String policyName)
+      throws IOException {
+    InodeTree.ResolveResult<AbstractFileSystem> res =
+        fsState.resolve(getUriPath(path), true);
+    res.targetFileSystem.setStoragePolicy(res.remainingPath, policyName);
+  }
+
   /*
    * An instance of this class represents an internal dir of the viewFs 
    * ie internal dir of the mount table.
@@ -878,6 +918,13 @@ public class ViewFs extends AbstractFileSystem {
     }
 
     @Override
+    public boolean truncate(final Path f, final long newLength)
+        throws FileNotFoundException, IOException {
+      checkPathIsSlash(f);
+      throw readOnlyMountTable("truncate", f);
+    }
+
+    @Override
     public void renameInternal(final Path src, final Path dst)
         throws AccessControlException, IOException {
       checkPathIsSlash(src);
@@ -1009,6 +1056,33 @@ public class ViewFs extends AbstractFileSystem {
     public void removeXAttr(Path path, String name) throws IOException {
       checkPathIsSlash(path);
       throw readOnlyMountTable("removeXAttr", path);
+    }
+
+    @Override
+    public Path createSnapshot(Path path, String snapshotName)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("createSnapshot", path);
+    }
+
+    @Override
+    public void renameSnapshot(Path path, String snapshotOldName,
+        String snapshotNewName) throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("renameSnapshot", path);
+    }
+
+    @Override
+    public void deleteSnapshot(Path path, String snapshotName)
+        throws IOException {
+      checkPathIsSlash(path);
+      throw readOnlyMountTable("deleteSnapshot", path);
+    }
+
+    @Override
+    public void setStoragePolicy(Path path, String policyName)
+        throws IOException {
+      throw readOnlyMountTable("setStoragePolicy", path);
     }
   }
 }

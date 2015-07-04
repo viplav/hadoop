@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FairSharePolicy;
@@ -48,10 +49,10 @@ public abstract class SchedulingPolicy {
    * Returns a {@link SchedulingPolicy} instance corresponding to the passed clazz
    */
   public static SchedulingPolicy getInstance(Class<? extends SchedulingPolicy> clazz) {
-    SchedulingPolicy policy = instances.get(clazz);
-    if (policy == null) {
-      policy = ReflectionUtils.newInstance(clazz, null);
-      instances.put(clazz, policy);
+    SchedulingPolicy policy = ReflectionUtils.newInstance(clazz, null);
+    SchedulingPolicy policyRet = instances.putIfAbsent(clazz, policy);
+    if(policyRet != null) {
+      return policyRet;
     }
     return policy;
   }
@@ -72,7 +73,7 @@ public abstract class SchedulingPolicy {
       throws AllocationConfigurationException {
     @SuppressWarnings("rawtypes")
     Class clazz;
-    String text = policy.toLowerCase();
+    String text = StringUtils.toLowerCase(policy);
     if (text.equalsIgnoreCase(FairSharePolicy.NAME)) {
       clazz = FairSharePolicy.class;
     } else if (text.equalsIgnoreCase(FifoPolicy.NAME)) {
@@ -184,10 +185,10 @@ public abstract class SchedulingPolicy {
    *
    * @param queueFairShare fairshare in the queue
    * @param queueUsage resources used in the queue
-   * @param clusterAvailable available resource in cluster
+   * @param maxAvailable available resource in cluster for this queue
    * @return calculated headroom
    */
   public abstract Resource getHeadroom(Resource queueFairShare,
-      Resource queueUsage, Resource clusterAvailable);
+      Resource queueUsage, Resource maxAvailable);
 
 }

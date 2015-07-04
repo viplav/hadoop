@@ -60,6 +60,8 @@ import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
+import org.apache.hadoop.util.ExitUtil.ExitException;
+import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Logger;
 import org.junit.After;
@@ -87,6 +89,8 @@ public class TestStartup {
 
   @Before
   public void setUp() throws Exception {
+    ExitUtil.disableSystemExit();
+    ExitUtil.resetFirstExitException();
     config = new HdfsConfiguration();
     hdfsDir = new File(MiniDFSCluster.getBaseDirectory());
 
@@ -403,7 +407,19 @@ public class TestStartup {
         cluster.shutdown();
     }
   }
-  
+
+  @Test(timeout = 30000)
+  public void testSNNStartupWithRuntimeException() throws Exception {
+    String[] argv = new String[] { "-checkpoint" };
+    try {
+      SecondaryNameNode.main(argv);
+      fail("Failed to handle runtime exceptions during SNN startup!");
+    } catch (ExitException ee) {
+      GenericTestUtils.assertExceptionContains("ExitException", ee);
+      assertTrue("Didn't termiated properly ", ExitUtil.terminateCalled());
+    }
+  }
+
   @Test
   public void testCompression() throws IOException {
     LOG.info("Test compressing image.");
@@ -425,7 +441,7 @@ public class TestStartup {
     NamenodeProtocols nnRpc = namenode.getRpcServer();
     assertTrue(nnRpc.getFileInfo("/test").isDir());
     nnRpc.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
-    nnRpc.saveNamespace();
+    nnRpc.saveNamespace(0, 0);
     namenode.stop();
     namenode.join();
 
@@ -455,7 +471,7 @@ public class TestStartup {
     NamenodeProtocols nnRpc = namenode.getRpcServer();
     assertTrue(nnRpc.getFileInfo("/test").isDir());
     nnRpc.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
-    nnRpc.saveNamespace();
+    nnRpc.saveNamespace(0, 0);
     namenode.stop();
     namenode.join();
   }

@@ -23,6 +23,7 @@ import java.net.URI;
 import java.net.UnknownHostException;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -53,7 +54,8 @@ import org.apache.hadoop.util.Time;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
-  static ThreadLocal<Long> shuffleStart = new ThreadLocal<Long>() {
+  private static final ThreadLocal<Long> SHUFFLE_START =
+      new ThreadLocal<Long>() {
     protected Long initialValue() {
       return 0L;
     }
@@ -64,7 +66,8 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
   private static final long INITIAL_PENALTY = 10000;
   private static final float PENALTY_GROWTH_RATE = 1.3f;
   private final static int REPORT_FAILURE_LIMIT = 10;
-
+  private static final float BYTES_PER_MILLIS_TO_MBS = 1000f / 1024 / 1024;
+  
   private final boolean[] finishedMaps;
 
   private final int totalMaps;
@@ -92,6 +95,8 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
   private final long startTime;
   private long lastProgressTime;
 
+  private final CopyTimeTracker copyTimeTracker;
+
   private volatile int maxMapRuntime = 0;
   private final int maxFailedUniqueFetches;
   private final int maxFetchFailuresBeforeReporting;
@@ -112,7 +117,7 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
                           Counters.Counter failedShuffleCounter) {
     totalMaps = job.getNumMapTasks();
     abortFailureLimit = Math.max(30, totalMaps / 10);
-
+    copyTimeTracker = new CopyTimeTracker();
     remainingMaps = totalMaps;
     finishedMaps = new boolean[remainingMaps];
     this.reporter = reporter;
@@ -180,7 +185,8 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
   public synchronized void copySucceeded(TaskAttemptID mapId,
                                          MapHost host,
                                          long bytes,
-                                         long millis,
+                                         long startMillis,
+                                         long endMillis,
                                          MapOutput<K,V> output
                                          ) throws IOException {
     failureCounts.remove(mapId);
@@ -195,29 +201,48 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
         notifyAll();
       }
 
-      // update the status
+      // update single copy task status
+      long copyMillis = (endMillis - startMillis);
+      if (copyMillis == 0) copyMillis = 1;
+      float bytesPerMillis = (float) bytes / copyMillis;
+      float transferRate = bytesPerMillis * BYTES_PER_MILLIS_TO_MBS;
+      String individualProgress = "copy task(" + mapId + " succeeded"
+          + " at " + mbpsFormat.format(transferRate) + " MB/s)";
+      // update the aggregated status
+      copyTimeTracker.add(startMillis, endMillis);
+
       totalBytesShuffledTillNow += bytes;
-      updateStatus();
+      updateStatus(individualProgress);
       reduceShuffleBytes.increment(bytes);
       lastProgressTime = Time.monotonicNow();
       LOG.debug("map " + mapId + " done " + status.getStateString());
     }
   }
 
-  private void updateStatus() {
-    float mbs = (float) totalBytesShuffledTillNow / (1024 * 1024);
+  private synchronized void updateStatus(String individualProgress) {
     int mapsDone = totalMaps - remainingMaps;
-    long secsSinceStart = (Time.monotonicNow() - startTime) / 1000 + 1;
-
-    float transferRate = mbs / secsSinceStart;
+    long totalCopyMillis = copyTimeTracker.getCopyMillis();
+    if (totalCopyMillis == 0) totalCopyMillis = 1;
+    float bytesPerMillis = (float) totalBytesShuffledTillNow / totalCopyMillis;
+    float transferRate = bytesPerMillis * BYTES_PER_MILLIS_TO_MBS;
     progress.set((float) mapsDone / totalMaps);
     String statusString = mapsDone + " / " + totalMaps + " copied.";
     status.setStateString(statusString);
 
-    progress.setStatus("copy(" + mapsDone + " of " + totalMaps + " at "
-        + mbpsFormat.format(transferRate) + " MB/s)");
+    if (individualProgress != null) {
+      progress.setStatus(individualProgress + " Aggregated copy rate(" + 
+          mapsDone + " of " + totalMaps + " at " + 
+      mbpsFormat.format(transferRate) + " MB/s)");
+    } else {
+      progress.setStatus("copy(" + mapsDone + " of " + totalMaps + " at "
+          + mbpsFormat.format(transferRate) + " MB/s)");
+    }
   }
   
+  private void updateStatus() {
+    updateStatus(null);
+  }
+
   public synchronized void hostFailed(String hostname) {
     if (hostFailures.containsKey(hostname)) {
       IntWritable x = hostFailures.get(hostname);
@@ -239,9 +264,17 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
       failureCounts.put(mapId, new IntWritable(1));
     }
     String hostname = host.getHostName();
+    IntWritable hostFailedNum = hostFailures.get(hostname);
+    // MAPREDUCE-6361: hostname could get cleanup from hostFailures in another
+    // thread with copySucceeded.
+    // In this case, add back hostname to hostFailures to get rid of NPE issue.
+    if (hostFailedNum == null) {
+      hostFailures.put(hostname, new IntWritable(1));
+    }
     //report failure if already retried maxHostFailures times
-    boolean hostFail = hostFailures.get(hostname).get() > getMaxHostFailures() ? true : false;
-    
+    boolean hostFail = hostFailures.get(hostname).get() >
+        getMaxHostFailures() ? true : false;
+
     if (failures >= abortFailureLimit) {
       try {
         throw new IOException(failures + " failures downloading " + mapId);
@@ -250,7 +283,8 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
       }
     }
 
-    checkAndInformJobTracker(failures, mapId, readError, connectExcpt, hostFail);
+    checkAndInformMRAppMaster(failures, mapId, readError, connectExcpt,
+        hostFail);
 
     checkReducerHealth();
 
@@ -275,15 +309,15 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
     reporter.reportException(ioe);
   }
 
-  // Notify the JobTracker
+  // Notify the MRAppMaster
   // after every read error, if 'reportReadErrorImmediately' is true or
   // after every 'maxFetchFailuresBeforeReporting' failures
-  private void checkAndInformJobTracker(
+  private void checkAndInformMRAppMaster(
       int failures, TaskAttemptID mapId, boolean readError,
       boolean connectExcpt, boolean hostFailed) {
     if (connectExcpt || (reportReadErrorImmediately && readError)
         || ((failures % maxFetchFailuresBeforeReporting) == 0) || hostFailed) {
-      LOG.info("Reporting fetch failure for " + mapId + " to jobtracker.");
+      LOG.info("Reporting fetch failure for " + mapId + " to MRAppMaster.");
       status.addFetchFailedMap((org.apache.hadoop.mapred.TaskAttemptID) mapId);
     }
   }
@@ -388,9 +422,9 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
       pendingHosts.remove(host);
       host.markBusy();
 
-      LOG.info("Assigning " + host + " with " + host.getNumKnownMapOutputs() +
+      LOG.debug("Assigning " + host + " with " + host.getNumKnownMapOutputs() +
                " to " + Thread.currentThread().getName());
-      shuffleStart.set(Time.monotonicNow());
+      SHUFFLE_START.set(Time.monotonicNow());
 
       return host;
   }
@@ -418,7 +452,7 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
         host.addKnownMap(id);
       }
     }
-    LOG.info("assigned " + includedMaps + " of " + totalSize + " to " +
+    LOG.debug("assigned " + includedMaps + " of " + totalSize + " to " +
              host + " to " + Thread.currentThread().getName());
     return result;
   }
@@ -431,7 +465,7 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
       }
     }
     LOG.info(host + " freed by " + Thread.currentThread().getName() + " in " +
-             (Time.monotonicNow()-shuffleStart.get()) + "ms");
+             (Time.monotonicNow()-SHUFFLE_START.get()) + "ms");
   }
 
   public synchronized void resetKnownMaps() {
@@ -519,5 +553,64 @@ public class ShuffleSchedulerImpl<K,V> implements ShuffleScheduler<K,V> {
 
   public int getMaxHostFailures() {
     return maxHostFailures;
+  }
+
+  private static class CopyTimeTracker {
+    List<Interval> intervals;
+    long copyMillis;
+    public CopyTimeTracker() {
+      intervals = Collections.emptyList();
+      copyMillis = 0;
+    }
+    public void add(long s, long e) {
+      Interval interval = new Interval(s, e);
+      copyMillis = getTotalCopyMillis(interval);
+    }
+  
+    public long getCopyMillis() {
+      return copyMillis;
+    }
+    // This method captures the time during which any copy was in progress 
+    // each copy time period is record in the Interval list
+    private long getTotalCopyMillis(Interval newInterval) {
+      if (newInterval == null) {
+        return copyMillis;
+      }
+      List<Interval> result = new ArrayList<Interval>(intervals.size() + 1);
+      for (Interval interval: intervals) {
+        if (interval.end < newInterval.start) {
+          result.add(interval);
+        } else if (interval.start > newInterval.end) {
+          result.add(newInterval);
+          newInterval = interval;        
+        } else {
+          newInterval = new Interval(
+              Math.min(interval.start, newInterval.start),
+              Math.max(newInterval.end, interval.end));
+        }
+      }
+      result.add(newInterval);
+      intervals = result;
+      
+      //compute total millis
+      long length = 0;
+      for (Interval interval : intervals) {
+        length += interval.getIntervalLength();
+      }
+      return length;
+    }
+    
+    private static class Interval {
+      final long start;
+      final long end;
+      public Interval(long s, long e) {
+        start = s;
+        end = e;
+      }
+      
+      public long getIntervalLength() {
+        return end - start;
+      }
+    }
   }
 }

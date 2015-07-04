@@ -31,8 +31,8 @@ import org.apache.hadoop.fs.permission.AclEntryScope;
 import org.apache.hadoop.fs.permission.AclEntryType;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -448,13 +448,16 @@ public class TestPBHelper {
         DFSTestUtil.getLocalDatanodeInfo("127.0.0.1", "h2",
             AdminStates.DECOMMISSIONED),
         DFSTestUtil.getLocalDatanodeInfo("127.0.0.1", "h3", 
-            AdminStates.NORMAL)
+            AdminStates.NORMAL),
+        DFSTestUtil.getLocalDatanodeInfo("127.0.0.1", "h4",
+            AdminStates.NORMAL),
     };
-    String[] storageIDs = {"s1", "s2", "s3"};
+    String[] storageIDs = {"s1", "s2", "s3", "s4"};
     StorageType[] media = {
         StorageType.DISK,
         StorageType.SSD,
-        StorageType.DISK
+        StorageType.DISK,
+        StorageType.RAM_DISK
     };
     LocatedBlock lb = new LocatedBlock(
         new ExtendedBlock("bp12", 12345, 10, 53),
@@ -475,10 +478,11 @@ public class TestPBHelper {
                                          AdminStates.NORMAL)
     };
     LocatedBlock lb = new LocatedBlock(
-        new ExtendedBlock("bp12", 12345, 10, 53), dnInfos, 5, false);
+        new ExtendedBlock("bp12", 12345, 10, 53), dnInfos);
     lb.setBlockToken(new Token<BlockTokenIdentifier>(
         "identifier".getBytes(), "password".getBytes(), new Text("kind"),
         new Text("service")));
+    lb.setStartOffset(5);
     return lb;
   }
 

@@ -216,10 +216,11 @@ public class DfsClientShmManager implements Closeable {
      * Must be called with the EndpointShmManager lock held.
      *
      * @param peer          The peer to use to talk to the DataNode.
-     * @param clientName    The client name.
      * @param usedPeer      (out param) Will be set to true if we used the peer.
      *                        When a peer is used
      *
+     * @param clientName    The client name.
+     * @param blockId       The block ID to use.
      * @return              null if the DataNode does not support shared memory
      *                        segments, or experienced an error creating the
      *                        shm.  The shared memory segment itself on success.
@@ -412,7 +413,8 @@ public class DfsClientShmManager implements Closeable {
   private final DomainSocketWatcher domainSocketWatcher;
   
   DfsClientShmManager(int interruptCheckPeriodMs) throws IOException {
-    this.domainSocketWatcher = new DomainSocketWatcher(interruptCheckPeriodMs);
+    this.domainSocketWatcher = new DomainSocketWatcher(interruptCheckPeriodMs,
+        "client");
   }
   
   public Slot allocSlot(DatanodeInfo datanode, DomainPeer peer,

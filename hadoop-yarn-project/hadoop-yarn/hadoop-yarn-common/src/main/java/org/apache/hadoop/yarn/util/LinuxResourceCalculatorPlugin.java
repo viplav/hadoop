@@ -19,12 +19,17 @@
 package org.apache.hadoop.yarn.util;
 
 import java.io.BufferedReader;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.FileReader;
+import java.io.InputStreamReader;
 import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.charset.Charset;
+import java.util.HashSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -38,8 +43,6 @@ import org.apache.hadoop.classification.InterfaceStability;
 public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   private static final Log LOG =
       LogFactory.getLog(LinuxResourceCalculatorPlugin.class);
-
-  public static final int UNAVAILABLE = -1;
 
   /**
    * proc's meminfo virtual file has keys-values in the format
@@ -57,46 +60,48 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   private static final String INACTIVE_STRING = "Inactive";
 
   /**
-   * Patterns for parsing /proc/cpuinfo
+   * Patterns for parsing /proc/cpuinfo.
    */
   private static final String PROCFS_CPUINFO = "/proc/cpuinfo";
   private static final Pattern PROCESSOR_FORMAT =
       Pattern.compile("^processor[ \t]:[ \t]*([0-9]*)");
   private static final Pattern FREQUENCY_FORMAT =
       Pattern.compile("^cpu MHz[ \t]*:[ \t]*([0-9.]*)");
+  private static final Pattern PHYSICAL_ID_FORMAT =
+      Pattern.compile("^physical id[ \t]*:[ \t]*([0-9]*)");
+  private static final Pattern CORE_ID_FORMAT =
+      Pattern.compile("^core id[ \t]*:[ \t]*([0-9]*)");
 
   /**
-   * Pattern for parsing /proc/stat
+   * Pattern for parsing /proc/stat.
    */
   private static final String PROCFS_STAT = "/proc/stat";
   private static final Pattern CPU_TIME_FORMAT =
-    Pattern.compile("^cpu[ \t]*([0-9]*)" +
+      Pattern.compile("^cpu[ \t]*([0-9]*)" +
     		            "[ \t]*([0-9]*)[ \t]*([0-9]*)[ \t].*");
+  private CpuTimeTracker cpuTimeTracker;
 
   private String procfsMemFile;
   private String procfsCpuFile;
   private String procfsStatFile;
-  long jiffyLengthInMillis;
+  private long jiffyLengthInMillis;
 
   private long ramSize = 0;
   private long swapSize = 0;
   private long ramSizeFree = 0;  // free ram space on the machine (kB)
   private long swapSizeFree = 0; // free swap space on the machine (kB)
   private long inactiveSize = 0; // inactive cache memory (kB)
-  private int numProcessors = 0; // number of processors on the system
+  /* number of logical processors on the system. */
+  private int numProcessors = 0;
+  /* number of physical cores on the system. */
+  private int numCores = 0;
   private long cpuFrequency = 0L; // CPU frequency on the system (kHz)
-  private long cumulativeCpuTime = 0L; // CPU used time since system is on (ms)
-  private long lastCumulativeCpuTime = 0L; // CPU used time read last time (ms)
-  // Unix timestamp while reading the CPU time (ms)
-  private float cpuUsage = UNAVAILABLE;
-  private long sampleTime = UNAVAILABLE;
-  private long lastSampleTime = UNAVAILABLE;
 
-  boolean readMemInfoFile = false;
-  boolean readCpuInfoFile = false;
+  private boolean readMemInfoFile = false;
+  private boolean readCpuInfoFile = false;
 
   /**
-   * Get current time
+   * Get current time.
    * @return Unix time stamp in millisecond
    */
   long getCurrentTime() {
@@ -104,15 +109,13 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   }
 
   public LinuxResourceCalculatorPlugin() {
-    procfsMemFile = PROCFS_MEMFILE;
-    procfsCpuFile = PROCFS_CPUINFO;
-    procfsStatFile = PROCFS_STAT;
-    jiffyLengthInMillis = ProcfsBasedProcessTree.JIFFY_LENGTH_IN_MILLIS;
+    this(PROCFS_MEMFILE, PROCFS_CPUINFO, PROCFS_STAT,
+        ProcfsBasedProcessTree.JIFFY_LENGTH_IN_MILLIS);
   }
 
   /**
    * Constructor which allows assigning the /proc/ directories. This will be
-   * used only in unit tests
+   * used only in unit tests.
    * @param procfsMemFile fake file for /proc/meminfo
    * @param procfsCpuFile fake file for /proc/cpuinfo
    * @param procfsStatFile fake file for /proc/stat
@@ -126,17 +129,18 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
     this.procfsCpuFile = procfsCpuFile;
     this.procfsStatFile = procfsStatFile;
     this.jiffyLengthInMillis = jiffyLengthInMillis;
+    this.cpuTimeTracker = new CpuTimeTracker(jiffyLengthInMillis);
   }
 
   /**
-   * Read /proc/meminfo, parse and compute memory information only once
+   * Read /proc/meminfo, parse and compute memory information only once.
    */
   private void readProcMemInfoFile() {
     readProcMemInfoFile(false);
   }
 
   /**
-   * Read /proc/meminfo, parse and compute memory information
+   * Read /proc/meminfo, parse and compute memory information.
    * @param readAgain if false, read only on the first time
    */
   private void readProcMemInfoFile(boolean readAgain) {
@@ -146,17 +150,20 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
     }
 
     // Read "/proc/memInfo" file
-    BufferedReader in = null;
-    FileReader fReader = null;
+    BufferedReader in;
+    InputStreamReader fReader;
     try {
-      fReader = new FileReader(procfsMemFile);
+      fReader = new InputStreamReader(
+          new FileInputStream(procfsMemFile), Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
     } catch (FileNotFoundException f) {
       // shouldn't happen....
+      LOG.warn("Couldn't read " + procfsMemFile
+          + "; can't determine memory settings");
       return;
     }
 
-    Matcher mat = null;
+    Matcher mat;
 
     try {
       String str = in.readLine();
@@ -197,26 +204,31 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   }
 
   /**
-   * Read /proc/cpuinfo, parse and calculate CPU information
+   * Read /proc/cpuinfo, parse and calculate CPU information.
    */
   private void readProcCpuInfoFile() {
     // This directory needs to be read only once
     if (readCpuInfoFile) {
       return;
     }
+    HashSet<String> coreIdSet = new HashSet<>();
     // Read "/proc/cpuinfo" file
-    BufferedReader in = null;
-    FileReader fReader = null;
+    BufferedReader in;
+    InputStreamReader fReader;
     try {
-      fReader = new FileReader(procfsCpuFile);
+      fReader = new InputStreamReader(
+          new FileInputStream(procfsCpuFile), Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
     } catch (FileNotFoundException f) {
       // shouldn't happen....
+      LOG.warn("Couldn't read " + procfsCpuFile + "; can't determine cpu info");
       return;
     }
-    Matcher mat = null;
+    Matcher mat;
     try {
       numProcessors = 0;
+      numCores = 1;
+      String currentPhysicalId = "";
       String str = in.readLine();
       while (str != null) {
         mat = PROCESSOR_FORMAT.matcher(str);
@@ -226,6 +238,15 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
         mat = FREQUENCY_FORMAT.matcher(str);
         if (mat.find()) {
           cpuFrequency = (long)(Double.parseDouble(mat.group(1)) * 1000); // kHz
+        }
+        mat = PHYSICAL_ID_FORMAT.matcher(str);
+        if (mat.find()) {
+          currentPhysicalId = str;
+        }
+        mat = CORE_ID_FORMAT.matcher(str);
+        if (mat.find()) {
+          coreIdSet.add(currentPhysicalId + " " + str);
+          numCores = coreIdSet.size();
         }
         str = in.readLine();
       }
@@ -248,21 +269,22 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   }
 
   /**
-   * Read /proc/stat file, parse and calculate cumulative CPU
+   * Read /proc/stat file, parse and calculate cumulative CPU.
    */
   private void readProcStatFile() {
     // Read "/proc/stat" file
-    BufferedReader in = null;
-    FileReader fReader = null;
+    BufferedReader in;
+    InputStreamReader fReader;
     try {
-      fReader = new FileReader(procfsStatFile);
+      fReader = new InputStreamReader(
+          new FileInputStream(procfsStatFile), Charset.forName("UTF-8"));
       in = new BufferedReader(fReader);
     } catch (FileNotFoundException f) {
       // shouldn't happen....
       return;
     }
 
-    Matcher mat = null;
+    Matcher mat;
     try {
       String str = in.readLine();
       while (str != null) {
@@ -271,12 +293,13 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
           long uTime = Long.parseLong(mat.group(1));
           long nTime = Long.parseLong(mat.group(2));
           long sTime = Long.parseLong(mat.group(3));
-          cumulativeCpuTime = uTime + nTime + sTime; // milliseconds
+          cpuTimeTracker.updateElapsedJiffies(
+              BigInteger.valueOf(uTime + nTime + sTime),
+              getCurrentTime());
           break;
         }
         str = in.readLine();
       }
-      cumulativeCpuTime *= jiffyLengthInMillis;
     } catch (IOException io) {
       LOG.warn("Error reading the stream " + io);
     } finally {
@@ -331,6 +354,13 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
 
   /** {@inheritDoc} */
   @Override
+  public int getNumCores() {
+    readProcCpuInfoFile();
+    return numCores;
+  }
+
+  /** {@inheritDoc} */
+  @Override
   public long getCpuFrequency() {
     readProcCpuInfoFile();
     return cpuFrequency;
@@ -340,38 +370,24 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
   @Override
   public long getCumulativeCpuTime() {
     readProcStatFile();
-    return cumulativeCpuTime;
+    return cpuTimeTracker.cumulativeCpuTime.longValue();
   }
 
   /** {@inheritDoc} */
   @Override
   public float getCpuUsage() {
     readProcStatFile();
-    sampleTime = getCurrentTime();
-    if (lastSampleTime == UNAVAILABLE ||
-        lastSampleTime > sampleTime) {
-      // lastSampleTime > sampleTime may happen when the system time is changed
-      lastSampleTime = sampleTime;
-      lastCumulativeCpuTime = cumulativeCpuTime;
-      return cpuUsage;
+    float overallCpuUsage = cpuTimeTracker.getCpuTrackerUsagePercent();
+    if (overallCpuUsage != CpuTimeTracker.UNAVAILABLE) {
+      overallCpuUsage = overallCpuUsage / getNumProcessors();
     }
-    // When lastSampleTime is sufficiently old, update cpuUsage.
-    // Also take a sample of the current time and cumulative CPU time for the
-    // use of the next calculation.
-    final long MINIMUM_UPDATE_INTERVAL = 10 * jiffyLengthInMillis;
-    if (sampleTime > lastSampleTime + MINIMUM_UPDATE_INTERVAL) {
-	    cpuUsage = (float)(cumulativeCpuTime - lastCumulativeCpuTime) * 100F /
-	               ((float)(sampleTime - lastSampleTime) * getNumProcessors());
-	    lastSampleTime = sampleTime;
-      lastCumulativeCpuTime = cumulativeCpuTime;
-    }
-    return cpuUsage;
+    return overallCpuUsage;
   }
 
   /**
-   * Test the {@link LinuxResourceCalculatorPlugin}
+   * Test the {@link LinuxResourceCalculatorPlugin}.
    *
-   * @param args
+   * @param args - arguments to this calculator test
    */
   public static void main(String[] args) {
     LinuxResourceCalculatorPlugin plugin = new LinuxResourceCalculatorPlugin();
@@ -394,5 +410,14 @@ public class LinuxResourceCalculatorPlugin extends ResourceCalculatorPlugin {
       // do nothing
     }
     System.out.println("CPU usage % : " + plugin.getCpuUsage());
+  }
+
+  @VisibleForTesting
+  void setReadCpuInfoFile(boolean readCpuInfoFileValue) {
+    this.readCpuInfoFile = readCpuInfoFileValue;
+  }
+
+  public long getJiffyLengthInMillis() {
+    return this.jiffyLengthInMillis;
   }
 }

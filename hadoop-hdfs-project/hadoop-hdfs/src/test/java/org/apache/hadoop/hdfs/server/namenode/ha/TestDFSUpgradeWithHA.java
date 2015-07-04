@@ -41,16 +41,19 @@ import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.qjournal.MiniQJMHACluster;
 import org.apache.hadoop.hdfs.qjournal.MiniQJMHACluster.Builder;
 import org.apache.hadoop.hdfs.qjournal.server.Journal;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
+import org.apache.hadoop.hdfs.util.BestEffortLongFile;
 import org.apache.hadoop.hdfs.util.PersistentLongFile;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Before;
 import org.junit.Test;
 
 import com.google.common.base.Joiner;
+import org.mockito.internal.util.reflection.Whitebox;
 
 /**
  * Tests for upgrading with HA enabled.
@@ -294,6 +297,16 @@ public class TestDFSUpgradeWithHA {
     }
   }
 
+  private long getCommittedTxnIdValue(MiniQJMHACluster qjCluster)
+      throws IOException {
+    Journal journal1 = qjCluster.getJournalCluster().getJournalNode(0)
+        .getOrCreateJournal(MiniQJMHACluster.NAMESERVICE);
+    BestEffortLongFile committedTxnId = (BestEffortLongFile) Whitebox
+        .getInternalState(journal1, "committedTxnId");
+    return committedTxnId != null ? committedTxnId.get() :
+        HdfsServerConstants.INVALID_TXID;
+  }
+
   /**
    * Make sure that an HA NN can successfully upgrade when configured using
    * JournalNodes.
@@ -320,7 +333,10 @@ public class TestDFSUpgradeWithHA {
       cluster.transitionToActive(0);
       fs = HATestUtil.configureFailoverFs(cluster, conf);
       assertTrue(fs.mkdirs(new Path("/foo1")));
-      
+
+      // get the value of the committedTxnId in journal nodes
+      final long cidBeforeUpgrade = getCommittedTxnIdValue(qjCluster);
+
       // Do the upgrade. Shut down NN1 and then restart NN0 with the upgrade
       // flag.
       cluster.shutdownNameNode(1);
@@ -330,6 +346,8 @@ public class TestDFSUpgradeWithHA {
       checkNnPreviousDirExistence(cluster, 0, true);
       checkNnPreviousDirExistence(cluster, 1, false);
       checkJnPreviousDirExistence(qjCluster, true);
+
+      assertTrue(cidBeforeUpgrade <= getCommittedTxnIdValue(qjCluster));
       
       // NN0 should come up in the active state when given the -upgrade option,
       // so no need to transition it to active.
@@ -342,6 +360,8 @@ public class TestDFSUpgradeWithHA {
       // Make sure we can still do FS ops after upgrading.
       cluster.transitionToActive(0);
       assertTrue(fs.mkdirs(new Path("/foo3")));
+
+      assertTrue(getCommittedTxnIdValue(qjCluster) > cidBeforeUpgrade);
       
       // Now bootstrap the standby with the upgraded info.
       int rc = BootstrapStandby.run(
@@ -388,15 +408,18 @@ public class TestDFSUpgradeWithHA {
       cluster.transitionToActive(0);
       fs = HATestUtil.configureFailoverFs(cluster, conf);
       assertTrue(fs.mkdirs(new Path("/foo1")));
+
+      final long cidBeforeUpgrade = getCommittedTxnIdValue(qjCluster);
       
       // Do the upgrade. Shut down NN1 and then restart NN0 with the upgrade
       // flag.
       cluster.shutdownNameNode(1);
       cluster.getNameNodeInfos()[0].setStartOpt(StartupOption.UPGRADE);
       cluster.restartNameNode(0, false);
+      assertTrue(cidBeforeUpgrade <= getCommittedTxnIdValue(qjCluster));
       
       assertTrue(fs.mkdirs(new Path("/foo2")));
-      
+
       checkNnPreviousDirExistence(cluster, 0, true);
       checkNnPreviousDirExistence(cluster, 1, false);
       checkJnPreviousDirExistence(qjCluster, true);
@@ -408,9 +431,13 @@ public class TestDFSUpgradeWithHA {
       assertEquals(0, rc);
       
       cluster.restartNameNode(1);
-      
+
+      final long cidDuringUpgrade = getCommittedTxnIdValue(qjCluster);
+      assertTrue(cidDuringUpgrade > cidBeforeUpgrade);
+
       runFinalizeCommand(cluster);
-      
+
+      assertEquals(cidDuringUpgrade, getCommittedTxnIdValue(qjCluster));
       checkClusterPreviousDirExistence(cluster, false);
       checkJnPreviousDirExistence(qjCluster, false);
       assertCTimesEqual(cluster);
@@ -566,7 +593,7 @@ public class TestDFSUpgradeWithHA {
       cluster.restartNameNode(1);
       
       checkNnPreviousDirExistence(cluster, 0, true);
-      checkNnPreviousDirExistence(cluster, 1, false);
+      checkNnPreviousDirExistence(cluster, 1, true);
       checkPreviousDirExistence(sharedDir, true);
       assertCTimesEqual(cluster);
       
@@ -614,7 +641,9 @@ public class TestDFSUpgradeWithHA {
       cluster.transitionToActive(0);
       fs = HATestUtil.configureFailoverFs(cluster, conf);
       assertTrue(fs.mkdirs(new Path("/foo1")));
-      
+
+      final long cidBeforeUpgrade = getCommittedTxnIdValue(qjCluster);
+
       // Do the upgrade. Shut down NN1 and then restart NN0 with the upgrade
       // flag.
       cluster.shutdownNameNode(1);
@@ -628,7 +657,10 @@ public class TestDFSUpgradeWithHA {
       // NN0 should come up in the active state when given the -upgrade option,
       // so no need to transition it to active.
       assertTrue(fs.mkdirs(new Path("/foo2")));
-      
+
+      final long cidDuringUpgrade = getCommittedTxnIdValue(qjCluster);
+      assertTrue(cidDuringUpgrade > cidBeforeUpgrade);
+
       // Now bootstrap the standby with the upgraded info.
       int rc = BootstrapStandby.run(
           new String[]{"-force"},
@@ -638,7 +670,7 @@ public class TestDFSUpgradeWithHA {
       cluster.restartNameNode(1);
       
       checkNnPreviousDirExistence(cluster, 0, true);
-      checkNnPreviousDirExistence(cluster, 1, false);
+      checkNnPreviousDirExistence(cluster, 1, true);
       checkJnPreviousDirExistence(qjCluster, true);
       assertCTimesEqual(cluster);
       
@@ -648,6 +680,11 @@ public class TestDFSUpgradeWithHA {
 
       conf.setStrings(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY, Joiner.on(",").join(nn1NameDirs));
       NameNode.doRollback(conf, false);
+
+      final long cidAfterRollback = getCommittedTxnIdValue(qjCluster);
+      assertTrue(cidBeforeUpgrade < cidAfterRollback);
+      // make sure the committedTxnId has been reset correctly after rollback
+      assertTrue(cidDuringUpgrade > cidAfterRollback);
 
       // The rollback operation should have rolled back the first NN's local
       // dirs, and the shared dir, but not the other NN's dirs. Those have to be

@@ -18,17 +18,22 @@
 package org.apache.hadoop.tracing;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.tracing.SpanReceiverInfo.ConfigurationPair;
 import org.apache.hadoop.util.ShutdownHookManager;
-import org.htrace.HTraceConfiguration;
-import org.htrace.SpanReceiver;
-import org.htrace.Trace;
+import org.apache.htrace.SpanReceiver;
+import org.apache.htrace.SpanReceiverBuilder;
+import org.apache.htrace.Trace;
+import org.apache.htrace.impl.LocalFileSpanReceiver;
 
 /**
  * This class provides functions for reading the names of SpanReceivers from
@@ -37,41 +42,49 @@ import org.htrace.Trace;
  * This class does nothing If no SpanReceiver is configured.
  */
 @InterfaceAudience.Private
-public class SpanReceiverHost {
-  public static final String SPAN_RECEIVERS_CONF_KEY = "hadoop.trace.spanreceiver.classes";
+public class SpanReceiverHost implements TraceAdminProtocol {
+  public static final String SPAN_RECEIVERS_CONF_SUFFIX =
+      "spanreceiver.classes";
   private static final Log LOG = LogFactory.getLog(SpanReceiverHost.class);
-  private Collection<SpanReceiver> receivers = new HashSet<SpanReceiver>();
+  private static final HashMap<String, SpanReceiverHost> hosts =
+      new HashMap<String, SpanReceiverHost>(1);
+  private final TreeMap<Long, SpanReceiver> receivers =
+      new TreeMap<Long, SpanReceiver>();
+  private final String confPrefix;
+  private Configuration config;
   private boolean closed = false;
+  private long highestId = 1;
 
-  private static enum SingletonHolder {
-    INSTANCE;
-    Object lock = new Object();
-    SpanReceiverHost host = null;
-  }
+  private final static String LOCAL_FILE_SPAN_RECEIVER_PATH_SUFFIX =
+      "local-file-span-receiver.path";
 
-  public static SpanReceiverHost getInstance(Configuration conf) {
-    if (SingletonHolder.INSTANCE.host != null) {
-      return SingletonHolder.INSTANCE.host;
-    }
-    synchronized (SingletonHolder.INSTANCE.lock) {
-      if (SingletonHolder.INSTANCE.host != null) {
-        return SingletonHolder.INSTANCE.host;
+  public static SpanReceiverHost get(Configuration conf, String confPrefix) {
+    synchronized (SpanReceiverHost.class) {
+      SpanReceiverHost host = hosts.get(confPrefix);
+      if (host != null) {
+        return host;
       }
-      SpanReceiverHost host = new SpanReceiverHost();
-      host.loadSpanReceivers(conf);
-      SingletonHolder.INSTANCE.host = host;
+      final SpanReceiverHost newHost = new SpanReceiverHost(confPrefix);
+      newHost.loadSpanReceivers(conf);
       ShutdownHookManager.get().addShutdownHook(new Runnable() {
           public void run() {
-            SingletonHolder.INSTANCE.host.closeReceivers();
+            newHost.closeReceivers();
           }
         }, 0);
-      return SingletonHolder.INSTANCE.host;
+      hosts.put(confPrefix, newHost);
+      return newHost;
     }
+  }
+
+  private static List<ConfigurationPair> EMPTY = Collections.emptyList();
+
+  private SpanReceiverHost(String confPrefix) {
+    this.confPrefix = confPrefix;
   }
 
   /**
    * Reads the names of classes specified in the
-   * "hadoop.trace.spanreceiver.classes" property and instantiates and registers
+   * "hadoop.htrace.spanreceiver.classes" property and instantiates and registers
    * them with the Tracer as SpanReceiver's.
    *
    * The nullary constructor is called during construction, but if the classes
@@ -79,61 +92,48 @@ public class SpanReceiverHost {
    * called on them. This allows SpanReceivers to use values from the Hadoop
    * configuration.
    */
-  public void loadSpanReceivers(Configuration conf) {
-    Class<?> implClass = null;
-    String[] receiverNames = conf.getTrimmedStrings(SPAN_RECEIVERS_CONF_KEY);
+  public synchronized void loadSpanReceivers(Configuration conf) {
+    config = new Configuration(conf);
+    String receiverKey = confPrefix + SPAN_RECEIVERS_CONF_SUFFIX;
+    String[] receiverNames = config.getTrimmedStrings(receiverKey);
     if (receiverNames == null || receiverNames.length == 0) {
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("No span receiver names found in " + receiverKey + ".");
+      }
       return;
     }
+    // It's convenient to have each daemon log to a random trace file when
+    // testing.
+    String pathKey = confPrefix + LOCAL_FILE_SPAN_RECEIVER_PATH_SUFFIX;
+    if (config.get(pathKey) == null) {
+      String uniqueFile = LocalFileSpanReceiver.getUniqueLocalTraceFileName();
+      config.set(pathKey, uniqueFile);
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Set " + pathKey + " to " + uniqueFile);
+      }
+    }
     for (String className : receiverNames) {
-      className = className.trim();
       try {
-        implClass = Class.forName(className);
-        receivers.add(loadInstance(implClass, conf));
-        LOG.info("SpanReceiver " + className + " was loaded successfully.");
-      } catch (ClassNotFoundException e) {
-        LOG.warn("Class " + className + " cannot be found.", e);
+        SpanReceiver rcvr = loadInstance(className, EMPTY);
+        Trace.addReceiver(rcvr);
+        receivers.put(highestId++, rcvr);
+        LOG.info("Loaded SpanReceiver " + className + " successfully.");
       } catch (IOException e) {
-        LOG.warn("Load SpanReceiver " + className + " failed.", e);
+        LOG.error("Failed to load SpanReceiver", e);
       }
-    }
-    for (SpanReceiver rcvr : receivers) {
-      Trace.addReceiver(rcvr);
     }
   }
 
-  private SpanReceiver loadInstance(Class<?> implClass, Configuration conf)
-      throws IOException {
-    SpanReceiver impl;
-    try {
-      Object o = ReflectionUtils.newInstance(implClass, conf);
-      impl = (SpanReceiver)o;
-      impl.configure(wrapHadoopConf(conf));
-    } catch (SecurityException e) {
-      throw new IOException(e);
-    } catch (IllegalArgumentException e) {
-      throw new IOException(e);
-    } catch (RuntimeException e) {
-      throw new IOException(e);
+  private synchronized SpanReceiver loadInstance(String className,
+      List<ConfigurationPair> extraConfig) throws IOException {
+    SpanReceiverBuilder builder =
+        new SpanReceiverBuilder(TraceUtils.
+            wrapHadoopConf(confPrefix, config, extraConfig));
+    SpanReceiver rcvr = builder.spanReceiverClass(className.trim()).build();
+    if (rcvr == null) {
+      throw new IOException("Failed to load SpanReceiver " + className);
     }
-
-    return impl;
-  }
-
-  private static HTraceConfiguration wrapHadoopConf(final Configuration conf) {
-    return new HTraceConfiguration() {
-      public static final String HTRACE_CONF_PREFIX = "hadoop.";
-
-      @Override
-      public String get(String key) {
-        return conf.get(HTRACE_CONF_PREFIX + key);
-      }
-
-      @Override
-      public String get(String key, String defaultValue) {
-        return conf.get(HTRACE_CONF_PREFIX + key, defaultValue);
-      }
-    };
+    return rcvr;
   }
 
   /**
@@ -142,12 +142,67 @@ public class SpanReceiverHost {
   public synchronized void closeReceivers() {
     if (closed) return;
     closed = true;
-    for (SpanReceiver rcvr : receivers) {
+    for (SpanReceiver rcvr : receivers.values()) {
       try {
         rcvr.close();
       } catch (IOException e) {
         LOG.warn("Unable to close SpanReceiver correctly: " + e.getMessage(), e);
       }
     }
+    receivers.clear();
+  }
+
+  public synchronized SpanReceiverInfo[] listSpanReceivers()
+      throws IOException {
+    SpanReceiverInfo[] info = new SpanReceiverInfo[receivers.size()];
+    int i = 0;
+
+    for(Map.Entry<Long, SpanReceiver> entry : receivers.entrySet()) {
+      info[i] = new SpanReceiverInfo(entry.getKey(),
+          entry.getValue().getClass().getName());
+      i++;
+    }
+    return info;
+  }
+
+  public synchronized long addSpanReceiver(SpanReceiverInfo info)
+      throws IOException {
+    StringBuilder configStringBuilder = new StringBuilder();
+    String prefix = "";
+    for (ConfigurationPair pair : info.configPairs) {
+      configStringBuilder.append(prefix).append(pair.getKey()).
+          append(" = ").append(pair.getValue());
+      prefix = ", ";
+    }
+    SpanReceiver rcvr = null;
+    try {
+      rcvr = loadInstance(info.getClassName(), info.configPairs);
+    } catch (IOException e) {
+      LOG.info("Failed to add SpanReceiver " + info.getClassName() +
+          " with configuration " + configStringBuilder.toString(), e);
+      throw e;
+    } catch (RuntimeException e) {
+      LOG.info("Failed to add SpanReceiver " + info.getClassName() +
+          " with configuration " + configStringBuilder.toString(), e);
+      throw e;
+    }
+    Trace.addReceiver(rcvr);
+    long newId = highestId++;
+    receivers.put(newId, rcvr);
+    LOG.info("Successfully added SpanReceiver " + info.getClassName() +
+        " with configuration " + configStringBuilder.toString());
+    return newId;
+  }
+
+  public synchronized void removeSpanReceiver(long spanReceiverId)
+      throws IOException {
+    SpanReceiver rcvr = receivers.remove(spanReceiverId);
+    if (rcvr == null) {
+      throw new IOException("There is no span receiver with id " + spanReceiverId);
+    }
+    Trace.removeReceiver(rcvr);
+    rcvr.close();
+    LOG.info("Successfully removed SpanReceiver " + spanReceiverId +
+        " with class " + rcvr.getClass().getName());
   }
 }

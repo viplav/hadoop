@@ -31,8 +31,13 @@ import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ReadOption;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
+import org.apache.hadoop.hdfs.client.impl.DfsClientConf;
+import org.apache.hadoop.hdfs.client.impl.DfsClientConf.ShortCircuitConf;
 import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -40,12 +45,15 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
 import org.apache.hadoop.hdfs.shortcircuit.ClientMmap;
-import org.apache.hadoop.util.DirectBufferPool;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.DirectBufferPool;
+import org.apache.htrace.Sampler;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 /**
  * BlockReaderLocalLegacy enables local short circuited reads. If the DFS client is on
@@ -69,6 +77,7 @@ import org.apache.hadoop.util.DataChecksum;
  * if security is enabled.</li>
  * </ul>
  */
+@InterfaceAudience.Private
 class BlockReaderLocalLegacy implements BlockReader {
   private static final Log LOG = LogFactory.getLog(BlockReaderLocalLegacy.class);
 
@@ -169,15 +178,18 @@ class BlockReaderLocalLegacy implements BlockReader {
   /** offset in block where reader wants to actually read */
   private long startOffset;
   private final String filename;
+  private long blockId;
   
   /**
    * The only way this object can be instantiated.
    */
-  static BlockReaderLocalLegacy newBlockReader(DFSClient.Conf conf,
+  static BlockReaderLocalLegacy newBlockReader(DfsClientConf conf,
       UserGroupInformation userGroupInformation,
       Configuration configuration, String file, ExtendedBlock blk,
       Token<BlockTokenIdentifier> token, DatanodeInfo node, 
-      long startOffset, long length) throws IOException {
+      long startOffset, long length, StorageType storageType)
+      throws IOException {
+    final ShortCircuitConf scConf = conf.getShortCircuitConf();
     LocalDatanodeInfo localDatanodeInfo = getLocalDatanodeInfo(node
         .getIpcPort());
     // check the cache first
@@ -187,8 +199,8 @@ class BlockReaderLocalLegacy implements BlockReader {
         userGroupInformation = UserGroupInformation.getCurrentUser();
       }
       pathinfo = getBlockPathInfo(userGroupInformation, blk, node,
-          configuration, conf.socketTimeout, token,
-          conf.connectToDnViaHostname);
+          configuration, conf.getSocketTimeout(), token,
+          conf.isConnectToDnViaHostname(), storageType);
     }
 
     // check to see if the file exists. It may so happen that the
@@ -200,7 +212,8 @@ class BlockReaderLocalLegacy implements BlockReader {
     FileInputStream dataIn = null;
     FileInputStream checksumIn = null;
     BlockReaderLocalLegacy localBlockReader = null;
-    boolean skipChecksumCheck = conf.skipShortCircuitChecksums;
+    final boolean skipChecksumCheck = scConf.isSkipShortCircuitChecksums()
+        || storageType.isTransient();
     try {
       // get a local file system
       File blkfile = new File(pathinfo.getBlockPath());
@@ -217,22 +230,15 @@ class BlockReaderLocalLegacy implements BlockReader {
         File metafile = new File(pathinfo.getMetaPath());
         checksumIn = new FileInputStream(metafile);
 
-        // read and handle the common header here. For now just a version
-        BlockMetadataHeader header = BlockMetadataHeader
-            .readHeader(new DataInputStream(checksumIn));
-        short version = header.getVersion();
-        if (version != BlockMetadataHeader.VERSION) {
-          LOG.warn("Wrong version (" + version + ") for metadata file for "
-              + blk + " ignoring ...");
-        }
-        DataChecksum checksum = header.getChecksum();
+        final DataChecksum checksum = BlockMetadataHeader.readDataChecksum(
+            new DataInputStream(checksumIn), blk);
         long firstChunkOffset = startOffset
             - (startOffset % checksum.getBytesPerChecksum());
-        localBlockReader = new BlockReaderLocalLegacy(conf, file, blk, token,
+        localBlockReader = new BlockReaderLocalLegacy(scConf, file, blk, token,
             startOffset, length, pathinfo, checksum, true, dataIn,
             firstChunkOffset, checksumIn);
       } else {
-        localBlockReader = new BlockReaderLocalLegacy(conf, file, blk, token,
+        localBlockReader = new BlockReaderLocalLegacy(scConf, file, blk, token,
             startOffset, length, pathinfo, dataIn);
       }
     } catch (IOException e) {
@@ -266,8 +272,8 @@ class BlockReaderLocalLegacy implements BlockReader {
   
   private static BlockLocalPathInfo getBlockPathInfo(UserGroupInformation ugi,
       ExtendedBlock blk, DatanodeInfo node, Configuration conf, int timeout,
-      Token<BlockTokenIdentifier> token, boolean connectToDnViaHostname)
-      throws IOException {
+      Token<BlockTokenIdentifier> token, boolean connectToDnViaHostname,
+      StorageType storageType) throws IOException {
     LocalDatanodeInfo localDatanodeInfo = getLocalDatanodeInfo(node.getIpcPort());
     BlockLocalPathInfo pathinfo = null;
     ClientDatanodeProtocol proxy = localDatanodeInfo.getDatanodeProxy(ugi, node,
@@ -275,7 +281,15 @@ class BlockReaderLocalLegacy implements BlockReader {
     try {
       // make RPC to local datanode to find local pathnames of blocks
       pathinfo = proxy.getBlockLocalPathInfo(blk, token);
-      if (pathinfo != null) {
+      // We cannot cache the path information for a replica on transient storage.
+      // If the replica gets evicted, then it moves to a different path.  Then,
+      // our next attempt to read from the cached path would fail to find the
+      // file.  Additionally, the failure would cause us to disable legacy
+      // short-circuit read for all subsequent use in the ClientContext.  Unlike
+      // the newer short-circuit read implementation, we have no communication
+      // channel for the DataNode to notify the client that the path has been
+      // invalidated.  Therefore, our only option is to skip caching.
+      if (pathinfo != null && !storageType.isTransient()) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Cached location of block " + blk + " as " + pathinfo);
         }
@@ -294,7 +308,7 @@ class BlockReaderLocalLegacy implements BlockReader {
       throw new IllegalArgumentException("Configured BlockReaderLocalLegacy " +
           "buffer size (" + bufferSizeBytes + ") is not large enough to hold " +
           "a single chunk (" + bytesPerChecksum +  "). Please configure " +
-          DFSConfigKeys.DFS_CLIENT_READ_SHORTCIRCUIT_BUFFER_SIZE_KEY +
+          HdfsClientConfigKeys.Read.ShortCircuit.BUFFER_SIZE_KEY +
           " appropriately");
     }
 
@@ -302,7 +316,7 @@ class BlockReaderLocalLegacy implements BlockReader {
     return bufferSizeBytes / bytesPerChecksum;
   }
 
-  private BlockReaderLocalLegacy(DFSClient.Conf conf, String hdfsfile,
+  private BlockReaderLocalLegacy(ShortCircuitConf conf, String hdfsfile,
       ExtendedBlock block, Token<BlockTokenIdentifier> token, long startOffset,
       long length, BlockLocalPathInfo pathinfo, FileInputStream dataIn)
       throws IOException {
@@ -311,7 +325,7 @@ class BlockReaderLocalLegacy implements BlockReader {
         dataIn, startOffset, null);
   }
 
-  private BlockReaderLocalLegacy(DFSClient.Conf conf, String hdfsfile,
+  private BlockReaderLocalLegacy(ShortCircuitConf conf, String hdfsfile,
       ExtendedBlock block, Token<BlockTokenIdentifier> token, long startOffset,
       long length, BlockLocalPathInfo pathinfo, DataChecksum checksum,
       boolean verifyChecksum, FileInputStream dataIn, long firstChunkOffset,
@@ -320,6 +334,7 @@ class BlockReaderLocalLegacy implements BlockReader {
     this.checksum = checksum;
     this.verifyChecksum = verifyChecksum;
     this.startOffset = Math.max(startOffset, 0);
+    this.blockId = block.getBlockId();
 
     bytesPerChecksum = this.checksum.getBytesPerChecksum();
     checksumSize = this.checksum.getChecksumSize();
@@ -328,8 +343,8 @@ class BlockReaderLocalLegacy implements BlockReader {
     this.checksumIn = checksumIn;
     this.offsetFromChunkBoundary = (int) (startOffset-firstChunkOffset);
 
-    int chunksPerChecksumRead = getSlowReadBufferNumChunks(
-        conf.shortCircuitBufferSize, bytesPerChecksum);
+    final int chunksPerChecksumRead = getSlowReadBufferNumChunks(
+        conf.getShortCircuitBufferSize(), bytesPerChecksum);
     slowReadBuff = bufferPool.getBuffer(bytesPerChecksum * chunksPerChecksumRead);
     checksumBuff = bufferPool.getBuffer(checksumSize * chunksPerChecksumRead);
     // Initially the buffers have nothing to read.
@@ -357,20 +372,26 @@ class BlockReaderLocalLegacy implements BlockReader {
    */
   private int fillBuffer(FileInputStream stream, ByteBuffer buf)
       throws IOException {
-    int bytesRead = stream.getChannel().read(buf);
-    if (bytesRead < 0) {
-      //EOF
-      return bytesRead;
-    }
-    while (buf.remaining() > 0) {
-      int n = stream.getChannel().read(buf);
-      if (n < 0) {
+    TraceScope scope = Trace.startSpan("BlockReaderLocalLegacy#fillBuffer(" +
+        blockId + ")", Sampler.NEVER);
+    try {
+      int bytesRead = stream.getChannel().read(buf);
+      if (bytesRead < 0) {
         //EOF
         return bytesRead;
       }
-      bytesRead += n;
+      while (buf.remaining() > 0) {
+        int n = stream.getChannel().read(buf);
+        if (n < 0) {
+          //EOF
+          return bytesRead;
+        }
+        bytesRead += n;
+      }
+      return bytesRead;
+    } finally {
+      scope.close();
     }
-    return bytesRead;
   }
   
   /**

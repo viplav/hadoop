@@ -36,6 +36,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.xml.sax.SAXException;
 
+import com.google.common.annotations.VisibleForTesting;
 /**
  * Maintains a list of queues as well as scheduling parameters for each queue,
  * such as guaranteed share allocations, from the fair scheduler config file.
@@ -91,7 +92,18 @@ public class QueueManager {
     }
     return (FSLeafQueue) queue;
   }
-  
+
+  /**
+   * Remove a leaf queue if empty
+   * @param name name of the queue
+   * @return true if queue was removed or false otherwise
+   */
+  public boolean removeLeafQueue(String name) {
+    name = ensureRootPrefix(name);
+    return removeEmptyIncompatibleQueues(name, FSQueueType.PARENT);
+  }
+
+
   /**
    * Get a parent queue by name, creating it if the create param is true and is necessary.
    * If the queue is not or can not be a parent queue, i.e. it already exists as a
@@ -144,7 +156,13 @@ public class QueueManager {
 
     // Move up the queue tree until we reach one that exists.
     while (sepIndex != -1) {
+      int prevSepIndex = sepIndex;
       sepIndex = name.lastIndexOf('.', sepIndex-1);
+      String node = name.substring(sepIndex+1, prevSepIndex);
+      if (!isQueueNameValid(node)) {
+        throw new InvalidQueueNameException("Illegal node name at offset " +
+            (sepIndex+1) + " for queue name " + name);
+      }
       FSQueue queue;
       String curName = null;
       curName = name.substring(0, sepIndex);
@@ -286,7 +304,8 @@ public class QueueManager {
       }
     }
     queues.remove(queue.getName());
-    queue.getParent().getChildQueues().remove(queue);
+    FSParentQueue parent = queue.getParent();
+    parent.removeChildQueue(queue);
   }
   
   /**
@@ -297,7 +316,7 @@ public class QueueManager {
     if (queue instanceof FSLeafQueue) {
       FSLeafQueue leafQueue = (FSLeafQueue)queue;
       return queue.getNumRunnableApps() == 0 &&
-          leafQueue.getNonRunnableAppSchedulables().isEmpty();
+          leafQueue.getNumNonRunnableApps() == 0;
     } else {
       for (FSQueue child : queue.getChildQueues()) {
         if (!isEmpty(child)) {
@@ -389,5 +408,14 @@ public class QueueManager {
     // Update the fair share preemption timeouts and preemption for all queues
     // recursively
     rootQueue.updatePreemptionVariables();
+  }
+
+  /**
+   * Check whether queue name is valid,
+   * return true if it is valid, otherwise return false.
+   */
+  @VisibleForTesting
+  boolean isQueueNameValid(String node) {
+    return !node.isEmpty() && node.equals(node.trim());
   }
 }

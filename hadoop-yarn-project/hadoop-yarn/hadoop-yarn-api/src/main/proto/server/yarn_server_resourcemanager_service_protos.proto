@@ -36,6 +36,7 @@ message RefreshQueuesResponseProto {
 }
 
 message RefreshNodesRequestProto {
+  optional DecommissionTypeProto decommissionType = 1 [default = NORMAL];
 }
 message RefreshNodesResponseProto {
 }
@@ -75,7 +76,47 @@ message UpdateNodeResourceRequestProto {
 message UpdateNodeResourceResponseProto {
 }
 
+message AddToClusterNodeLabelsRequestProto {
+  repeated NodeLabelProto nodeLabels = 1;
+}
 
+message AddToClusterNodeLabelsResponseProto {
+}
+
+message RemoveFromClusterNodeLabelsRequestProto {
+  repeated string nodeLabels = 1;
+}
+
+message RemoveFromClusterNodeLabelsResponseProto {
+}
+
+message ReplaceLabelsOnNodeRequestProto {
+  repeated NodeIdToLabelsNameProto nodeToLabels = 1;
+}
+
+message ReplaceLabelsOnNodeResponseProto {
+  
+}
+
+message UpdateNodeLabelsResponseProto {
+}
+
+message CheckForDecommissioningNodesRequestProto {
+}
+message CheckForDecommissioningNodesResponseProto {
+  repeated NodeIdProto decommissioningNodes = 1;
+}
+
+message NodeIdToLabelsNameProto {
+  optional NodeIdProto nodeId = 1;
+  repeated string nodeLabels = 2;
+}
+
+enum DecommissionTypeProto {
+  NORMAL = 1;
+  GRACEFUL = 2;
+  FORCEFUL = 3;
+}
 //////////////////////////////////////////////////////////////////
 ///////////// RM Failover related records ////////////////////////
 //////////////////////////////////////////////////////////////////

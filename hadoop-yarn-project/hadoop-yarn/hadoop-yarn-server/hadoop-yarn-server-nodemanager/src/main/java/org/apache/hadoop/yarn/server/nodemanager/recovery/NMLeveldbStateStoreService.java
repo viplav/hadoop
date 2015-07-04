@@ -47,6 +47,7 @@ import org.apache.hadoop.yarn.proto.YarnServerCommonProtos.VersionProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.ContainerManagerApplicationProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.DeletionServiceDeleteTaskProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LocalizedResourceProto;
+import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LogDeleterProto;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.StartContainerRequestProto;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 import org.apache.hadoop.yarn.server.api.records.impl.pb.MasterKeyPBImpl;
@@ -115,9 +116,12 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
   private static final String CONTAINER_TOKENS_PREV_MASTER_KEY =
       CONTAINER_TOKENS_KEY_PREFIX + PREV_MASTER_KEY_SUFFIX;
 
+  private static final String LOG_DELETER_KEY_PREFIX = "LogDeleters/";
+
   private static final byte[] EMPTY_VALUE = new byte[0];
 
   private DB db;
+  private boolean isNewlyCreated;
 
   public NMLeveldbStateStoreService() {
     super(NMLeveldbStateStoreService.class.getName());
@@ -134,12 +138,19 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
     }
   }
 
+  @Override
+  public boolean isNewlyCreated() {
+    return isNewlyCreated;
+  }
+
 
   @Override
   public List<RecoveredContainerState> loadContainersState()
       throws IOException {
     ArrayList<RecoveredContainerState> containers =
         new ArrayList<RecoveredContainerState>();
+    ArrayList<ContainerId> containersToRemove =
+              new ArrayList<ContainerId>();
     LeveldbIterator iter = null;
     try {
       iter = new LeveldbIterator(db);
@@ -159,13 +170,33 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
         ContainerId containerId = ConverterUtils.toContainerId(
             key.substring(CONTAINERS_KEY_PREFIX.length(), idEndPos));
         String keyPrefix = key.substring(0, idEndPos+1);
-        containers.add(loadContainerState(containerId, iter, keyPrefix));
+        RecoveredContainerState rcs = loadContainerState(containerId,
+            iter, keyPrefix);
+        // Don't load container without StartContainerRequest
+        if (rcs.startRequest != null) {
+          containers.add(rcs);
+        } else {
+          containersToRemove.add(containerId);
+        }
       }
     } catch (DBException e) {
       throw new IOException(e);
     } finally {
       if (iter != null) {
         iter.close();
+      }
+    }
+
+    // remove container without StartContainerRequest
+    for (ContainerId containerId : containersToRemove) {
+      LOG.warn("Remove container " + containerId +
+          " with incomplete records");
+      try {
+        removeContainer(containerId);
+        // TODO: kill and cleanup the leaked container
+      } catch (IOException e) {
+        LOG.error("Unable to remove container " + containerId +
+            " in store", e);
       }
     }
 
@@ -824,6 +855,69 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
 
   @Override
+  public RecoveredLogDeleterState loadLogDeleterState() throws IOException {
+    RecoveredLogDeleterState state = new RecoveredLogDeleterState();
+    state.logDeleterMap = new HashMap<ApplicationId, LogDeleterProto>();
+    LeveldbIterator iter = null;
+    try {
+      iter = new LeveldbIterator(db);
+      iter.seek(bytes(LOG_DELETER_KEY_PREFIX));
+      final int logDeleterKeyPrefixLength = LOG_DELETER_KEY_PREFIX.length();
+      while (iter.hasNext()) {
+        Entry<byte[], byte[]> entry = iter.next();
+        String fullKey = asString(entry.getKey());
+        if (!fullKey.startsWith(LOG_DELETER_KEY_PREFIX)) {
+          break;
+        }
+
+        String appIdStr = fullKey.substring(logDeleterKeyPrefixLength);
+        ApplicationId appId = null;
+        try {
+          appId = ConverterUtils.toApplicationId(appIdStr);
+        } catch (IllegalArgumentException e) {
+          LOG.warn("Skipping unknown log deleter key " + fullKey);
+          continue;
+        }
+
+        LogDeleterProto proto = LogDeleterProto.parseFrom(entry.getValue());
+        state.logDeleterMap.put(appId, proto);
+      }
+    } catch (DBException e) {
+      throw new IOException(e);
+    } finally {
+      if (iter != null) {
+        iter.close();
+      }
+    }
+    return state;
+  }
+
+  @Override
+  public void storeLogDeleter(ApplicationId appId, LogDeleterProto proto)
+      throws IOException {
+    String key = getLogDeleterKey(appId);
+    try {
+      db.put(bytes(key), proto.toByteArray());
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  @Override
+  public void removeLogDeleter(ApplicationId appId) throws IOException {
+    String key = getLogDeleterKey(appId);
+    try {
+      db.delete(bytes(key));
+    } catch (DBException e) {
+      throw new IOException(e);
+    }
+  }
+
+  private String getLogDeleterKey(ApplicationId appId) {
+    return LOG_DELETER_KEY_PREFIX + appId;
+  }
+
+  @Override
   protected void initStorage(Configuration conf)
       throws IOException {
     Path storeRoot = createStorageDir(conf);
@@ -837,6 +931,7 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
     } catch (NativeDB.DBException e) {
       if (e.isNotFound() || e.getMessage().contains(" does not exist ")) {
         LOG.info("Creating state database at " + dbfile);
+        isNewlyCreated = true;
         options.createIfMissing(true);
         try {
           db = JniDBFactory.factory.open(dbfile, options);
@@ -878,9 +973,9 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
 
   Version loadVersion() throws IOException {
     byte[] data = db.get(bytes(DB_SCHEMA_VERSION_KEY));
-    // if version is not stored previously, treat it as 1.0.
+    // if version is not stored previously, treat it as CURRENT_VERSION_INFO.
     if (data == null || data.length == 0) {
-      return Version.newInstance(1, 0);
+      return getCurrentVersion();
     }
     Version version =
         new VersionPBImpl(VersionProto.parseFrom(data));
@@ -937,5 +1032,4 @@ public class NMLeveldbStateStoreService extends NMStateStoreService {
             + getCurrentVersion() + ", but loading version " + loadedVersion);
     }
   }
-  
 }

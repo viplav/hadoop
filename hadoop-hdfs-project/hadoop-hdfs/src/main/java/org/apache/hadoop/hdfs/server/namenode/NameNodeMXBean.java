@@ -81,9 +81,10 @@ public interface NameNodeMXBean {
   public boolean isUpgradeFinalized();
 
   /**
-   * Gets the RollingUpgrade information
+   * Gets the RollingUpgrade information.
    *
-   * @return Rolling upgrade information
+   * @return Rolling upgrade information if an upgrade is in progress. Else
+   * (e.g. if there is no upgrade or the upgrade is finalized), returns null.
    */
   public RollingUpgradeInfo.Bean getRollingUpgradeStatus();
 
@@ -147,10 +148,19 @@ public interface NameNodeMXBean {
   /**
    * Gets the total number of missing blocks on the cluster
    * 
-   * @return the total number of files and blocks on the cluster
+   * @return the total number of missing blocks on the cluster
    */
   public long getNumberOfMissingBlocks();
   
+  /**
+   * Gets the total number of missing blocks on the cluster with
+   * replication factor 1
+   *
+   * @return the total number of missing blocks on the cluster with
+   * replication factor 1
+   */
+  public long getNumberOfMissingBlocksWithReplicationFactorOne();
+
   /**
    * Gets the number of threads.
    * 

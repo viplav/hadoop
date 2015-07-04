@@ -28,6 +28,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
@@ -241,6 +242,7 @@ public class FairSchedulerConfiguration extends Configuration {
   public static Resource parseResourceConfigValue(String val)
       throws AllocationConfigurationException {
     try {
+      val = StringUtils.toLowerCase(val);
       int memory = findResource(val, "mb");
       int vcores = findResource(val, "vcores");
       return BuilderUtils.newResource(memory, vcores);
@@ -258,7 +260,7 @@ public class FairSchedulerConfiguration extends Configuration {
   
   private static int findResource(String val, String units)
     throws AllocationConfigurationException {
-    Pattern pattern = Pattern.compile("(\\d+) ?" + units);
+    Pattern pattern = Pattern.compile("(\\d+)\\s*" + units);
     Matcher matcher = pattern.matcher(val);
     if (!matcher.find()) {
       throw new AllocationConfigurationException("Missing resource: " + units);

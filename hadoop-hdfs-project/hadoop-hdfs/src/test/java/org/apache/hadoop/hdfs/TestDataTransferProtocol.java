@@ -39,6 +39,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
@@ -50,6 +51,7 @@ import org.apache.hadoop.hdfs.protocol.datatransfer.Op;
 import org.apache.hadoop.hdfs.protocol.datatransfer.PacketHeader;
 import org.apache.hadoop.hdfs.protocol.datatransfer.PipelineAck;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.BlockOpResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.BlockOpResponseProto.Builder;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReadOpChecksumInfoProto;
@@ -160,7 +162,9 @@ public class TestDataTransferProtocol {
 
     //ok finally write a block with 0 len
     sendResponse(Status.SUCCESS, "", null, recvOut);
-    new PipelineAck(100, new Status[]{Status.SUCCESS}).write(recvOut);
+    new PipelineAck(100, new int[] {PipelineAck.combineHeader
+      (PipelineAck.ECN.DISABLED, Status.SUCCESS)}).write
+      (recvOut);
     sendRecvData(description, false);
   }
   
@@ -393,7 +397,8 @@ public class TestDataTransferProtocol {
     hdr.write(sendOut);
 
     sendResponse(Status.SUCCESS, "", null, recvOut);
-    new PipelineAck(100, new Status[]{Status.ERROR}).write(recvOut);
+    new PipelineAck(100, new int[] {PipelineAck.combineHeader
+      (PipelineAck.ECN.DISABLED, Status.ERROR)}).write(recvOut);
     sendRecvData("negative DATA_CHUNK len while writing block " + newBlockId, 
                  true);
 
@@ -414,7 +419,8 @@ public class TestDataTransferProtocol {
     sendOut.flush();
     //ok finally write a block with 0 len
     sendResponse(Status.SUCCESS, "", null, recvOut);
-    new PipelineAck(100, new Status[]{Status.SUCCESS}).write(recvOut);
+    new PipelineAck(100, new int[] {PipelineAck.combineHeader
+      (PipelineAck.ECN.DISABLED, Status.SUCCESS)}).write(recvOut);
     sendRecvData("Writing a zero len block blockid " + newBlockId, false);
     
     /* Test OP_READ_BLOCK */
@@ -513,6 +519,35 @@ public class TestDataTransferProtocol {
     assertFalse(hdr.sanityCheck(100));
   }
 
+  @Test
+  public void TestPipeLineAckCompatibility() throws IOException {
+    DataTransferProtos.PipelineAckProto proto = DataTransferProtos
+        .PipelineAckProto.newBuilder()
+        .setSeqno(0)
+        .addReply(Status.CHECKSUM_OK)
+        .build();
+
+    DataTransferProtos.PipelineAckProto newProto = DataTransferProtos
+        .PipelineAckProto.newBuilder().mergeFrom(proto)
+        .addFlag(PipelineAck.combineHeader(PipelineAck.ECN.SUPPORTED,
+                                           Status.CHECKSUM_OK))
+        .build();
+
+    ByteArrayOutputStream oldAckBytes = new ByteArrayOutputStream();
+    proto.writeDelimitedTo(oldAckBytes);
+    PipelineAck oldAck = new PipelineAck();
+    oldAck.readFields(new ByteArrayInputStream(oldAckBytes.toByteArray()));
+    assertEquals(PipelineAck.combineHeader(PipelineAck.ECN.DISABLED, Status
+        .CHECKSUM_OK), oldAck.getHeaderFlag(0));
+
+    PipelineAck newAck = new PipelineAck();
+    ByteArrayOutputStream newAckBytes = new ByteArrayOutputStream();
+    newProto.writeDelimitedTo(newAckBytes);
+    newAck.readFields(new ByteArrayInputStream(newAckBytes.toByteArray()));
+    assertEquals(PipelineAck.combineHeader(PipelineAck.ECN.SUPPORTED, Status
+        .CHECKSUM_OK), newAck.getHeaderFlag(0));
+  }
+
   void writeBlock(String poolId, long blockId, DataChecksum checksum) throws IOException {
     writeBlock(new ExtendedBlock(poolId, blockId),
         BlockConstructionStage.PIPELINE_SETUP_CREATE, 0L, checksum);
@@ -524,6 +559,6 @@ public class TestDataTransferProtocol {
         BlockTokenSecretManager.DUMMY_TOKEN, "cl",
         new DatanodeInfo[1], new StorageType[1], null, stage,
         0, block.getNumBytes(), block.getNumBytes(), newGS,
-        checksum, CachingStrategy.newDefaultStrategy());
+        checksum, CachingStrategy.newDefaultStrategy(), false, false, null);
   }
 }

@@ -34,9 +34,12 @@ import java.util.Arrays;
 
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.fs.ChecksumException;
+import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.datatransfer.PacketHeader;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.LengthInputStream;
 import org.apache.hadoop.hdfs.util.DataTransferThrottler;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.LongWritable;
@@ -44,6 +47,9 @@ import org.apache.hadoop.io.ReadaheadPool.ReadaheadRequest;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.net.SocketOutputStream;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.htrace.Sampler;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -99,8 +105,13 @@ class BlockSender implements java.io.Closeable {
    * not sure if there will be much more improvement.
    */
   private static final int MIN_BUFFER_WITH_TRANSFERTO = 64*1024;
+  private static final int IO_FILE_BUFFER_SIZE;
+  static {
+    HdfsConfiguration conf = new HdfsConfiguration();
+    IO_FILE_BUFFER_SIZE = DFSUtil.getIoFileBufferSize(conf);
+  }
   private static final int TRANSFERTO_BUFFER_SIZE = Math.max(
-      HdfsConstants.IO_FILE_BUFFER_SIZE, MIN_BUFFER_WITH_TRANSFERTO);
+      IO_FILE_BUFFER_SIZE, MIN_BUFFER_WITH_TRANSFERTO);
   
   /** the block to read from */
   private final ExtendedBlock block;
@@ -139,6 +150,8 @@ class BlockSender implements java.io.Closeable {
   
   /** The file descriptor of the block being sent */
   private FileDescriptor blockInFd;
+  /** The reference to the volume where the block is located */
+  private FsVolumeReference volumeRef;
 
   // Cache-management related fields
   private final long readaheadLength;
@@ -239,6 +252,13 @@ class BlockSender implements java.io.Closeable {
       if (replica.getGenerationStamp() < block.getGenerationStamp()) {
         throw new IOException("Replica gen stamp < block genstamp, block="
             + block + ", replica=" + replica);
+      } else if (replica.getGenerationStamp() > block.getGenerationStamp()) {
+        if (DataNode.LOG.isDebugEnabled()) {
+          DataNode.LOG.debug("Bumping up the client provided"
+              + " block's genstamp to latest " + replica.getGenerationStamp()
+              + " for block " + block);
+        }
+        block.setGenerationStamp(replica.getGenerationStamp());
       }
       if (replicaVisibleLength < 0) {
         throw new IOException("Replica is not readable, block="
@@ -253,6 +273,9 @@ class BlockSender implements java.io.Closeable {
       this.transferToAllowed = datanode.getDnConf().transferToAllowed &&
         (!is32Bit || length <= Integer.MAX_VALUE);
 
+      // Obtain a reference before reading data
+      this.volumeRef = datanode.data.getVolume(block).obtainReference();
+
       /* 
        * (corruptChecksumOK, meta_file_exist): operation
        * True,   True: will verify checksum  
@@ -262,26 +285,37 @@ class BlockSender implements java.io.Closeable {
        */
       DataChecksum csum = null;
       if (verifyChecksum || sendChecksum) {
-        final InputStream metaIn = datanode.data.getMetaDataInputStream(block);
-        if (!corruptChecksumOk || metaIn != null) {
-          if (metaIn == null) {
-            //need checksum but meta-data not found
-            throw new FileNotFoundException("Meta-data not found for " + block);
-          }
+        LengthInputStream metaIn = null;
+        boolean keepMetaInOpen = false;
+        try {
+          metaIn = datanode.data.getMetaDataInputStream(block);
+          if (!corruptChecksumOk || metaIn != null) {
+            if (metaIn == null) {
+              //need checksum but meta-data not found
+              throw new FileNotFoundException("Meta-data not found for " +
+                  block);
+            }
 
-          checksumIn = new DataInputStream(
-              new BufferedInputStream(metaIn, HdfsConstants.IO_FILE_BUFFER_SIZE));
+            // The meta file will contain only the header if the NULL checksum
+            // type was used, or if the replica was written to transient storage.
+            // Checksum verification is not performed for replicas on transient
+            // storage.  The header is important for determining the checksum
+            // type later when lazy persistence copies the block to non-transient
+            // storage and computes the checksum.
+            if (metaIn.getLength() > BlockMetadataHeader.getHeaderSize()) {
+              checksumIn = new DataInputStream(new BufferedInputStream(
+                  metaIn, IO_FILE_BUFFER_SIZE));
   
-          // read and handle the common header here. For now just a version
-          BlockMetadataHeader header = BlockMetadataHeader.readHeader(checksumIn);
-          short version = header.getVersion();
-          if (version != BlockMetadataHeader.VERSION) {
-            LOG.warn("Wrong version (" + version + ") for metadata file for "
-                + block + " ignoring ...");
+              csum = BlockMetadataHeader.readDataChecksum(checksumIn, block);
+              keepMetaInOpen = true;
+            }
+          } else {
+            LOG.warn("Could not find metadata file for " + block);
           }
-          csum = header.getChecksum();
-        } else {
-          LOG.warn("Could not find metadata file for " + block);
+        } finally {
+          if (!keepMetaInOpen) {
+            IOUtils.closeStream(metaIn);
+          }
         }
       }
       if (csum == null) {
@@ -340,7 +374,7 @@ class BlockSender implements java.io.Closeable {
       endOffset = end;
 
       // seek to the right offsets
-      if (offset > 0) {
+      if (offset > 0 && checksumIn != null) {
         long checksumSkip = (offset / chunkSize) * checksumSize;
         // note blockInStream is seeked when created below
         if (checksumSkip > 0) {
@@ -404,6 +438,10 @@ class BlockSender implements java.io.Closeable {
       }
       blockIn = null;
       blockInFd = null;
+    }
+    if (volumeRef != null) {
+      IOUtils.cleanup(null, volumeRef);
+      volumeRef = null;
     }
     // throw IOException if there is any
     if(ioe!= null) {
@@ -559,12 +597,9 @@ class BlockSender implements java.io.Closeable {
          * writing to client timed out.  This happens if the client reads
          * part of a block and then decides not to read the rest (but leaves
          * the socket open).
+         * 
+         * Reporting of this case is done in DataXceiver#run
          */
-        if (LOG.isTraceEnabled()) {
-          LOG.trace("Failed to send data:", e);
-        } else {
-          LOG.info("Failed to send data: " + e);
-        }
       } else {
         /* Exception while writing to the client. Connection closure from
          * the other end is mostly the case and we do not care much about
@@ -579,6 +614,9 @@ class BlockSender implements java.io.Closeable {
         if (!ioem.startsWith("Broken pipe") && !ioem.startsWith("Connection reset")) {
           LOG.error("BlockSender.sendChunks() exception: ", e);
         }
+        datanode.getBlockScanner().markSuspectBlock(
+              volumeRef.getVolume().getStorageID(),
+              block);
       }
       throw ioeToSocketException(e);
     }
@@ -668,6 +706,17 @@ class BlockSender implements java.io.Closeable {
    */
   long sendBlock(DataOutputStream out, OutputStream baseStream, 
                  DataTransferThrottler throttler) throws IOException {
+    TraceScope scope =
+        Trace.startSpan("sendBlock_" + block.getBlockId(), Sampler.NEVER);
+    try {
+      return doSendBlock(out, baseStream, throttler);
+    } finally {
+      scope.close();
+    }
+  }
+
+  private long doSendBlock(DataOutputStream out, OutputStream baseStream,
+        DataTransferThrottler throttler) throws IOException {
     if (out == null) {
       throw new IOException( "out stream is null" );
     }
@@ -704,7 +753,7 @@ class BlockSender implements java.io.Closeable {
         pktBufSize += checksumSize * maxChunksPerPacket;
       } else {
         maxChunksPerPacket = Math.max(1,
-            numberOfChunks(HdfsConstants.IO_FILE_BUFFER_SIZE));
+            numberOfChunks(IO_FILE_BUFFER_SIZE));
         // Packet size includes both checksum and data
         pktBufSize += (chunkSize + checksumSize) * maxChunksPerPacket;
       }

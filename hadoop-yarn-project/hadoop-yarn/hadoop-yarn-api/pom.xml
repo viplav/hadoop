@@ -25,7 +25,7 @@
   <groupId>org.apache.hadoop</groupId>
   <artifactId>hadoop-yarn-api</artifactId>
   <version>3.0.0-SNAPSHOT</version>
-  <name>hadoop-yarn-api</name>
+  <name>Apache Hadoop YARN API</name>
 
   <properties>
     <!-- Needed for generating FindBugs warnings using parent pom -->
@@ -96,6 +96,8 @@
                   <include>server/resourcemanager_administration_protocol.proto</include>
                   <include>application_history_client.proto</include>
                   <include>server/application_history_server.proto</include>
+                  <include>client_SCM_protocol.proto</include>
+                  <include>server/SCM_Admin_protocol.proto</include>
                 </includes>
               </source>
               <output>${project.build.directory}/generated-sources/java</output>

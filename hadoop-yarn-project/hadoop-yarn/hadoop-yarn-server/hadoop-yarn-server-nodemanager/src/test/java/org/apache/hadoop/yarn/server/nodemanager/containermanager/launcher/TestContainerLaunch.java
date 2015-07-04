@@ -39,6 +39,9 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.StringTokenizer;
+import java.util.jar.JarFile;
+import java.util.jar.Manifest;
 
 import org.apache.commons.codec.binary.Base64;
 import org.apache.hadoop.conf.Configuration;
@@ -65,6 +68,7 @@ import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
 import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
+import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.Token;
@@ -75,13 +79,21 @@ import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
+import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor;
+import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor.ExitCode;
 import org.apache.hadoop.yarn.server.nodemanager.DefaultContainerExecutor;
+import org.apache.hadoop.yarn.server.nodemanager.Context;
+import org.apache.hadoop.yarn.server.nodemanager.NodeManager.NMContext;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.BaseContainerManagerTest;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerExitEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainerLaunch.ShellScriptBuilder;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
+import org.apache.hadoop.yarn.server.nodemanager.security.NMContainerTokenSecretManager;
+import org.apache.hadoop.yarn.server.nodemanager.security.NMTokenSecretManagerInNM;
+import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
+import org.apache.hadoop.yarn.server.nodemanager.recovery.NMNullStateStoreService;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.AuxiliaryServiceHelper;
@@ -94,6 +106,17 @@ import org.junit.Before;
 import org.junit.Test;
 
 public class TestContainerLaunch extends BaseContainerManagerTest {
+
+  protected Context distContext = new NMContext(new NMContainerTokenSecretManager(
+    conf), new NMTokenSecretManagerInNM(), null,
+    new ApplicationACLsManager(conf), new NMNullStateStoreService()) {
+    public int getHttpPort() {
+      return HTTP_PORT;
+    };
+    public NodeId getNodeId() {
+      return NodeId.newInstance("ahost", 1234);
+    };
+  };
 
   public TestContainerLaunch() throws UnsupportedFileSystemException {
     super();
@@ -143,7 +166,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
         commands.add("/bin/sh ./\\\"" + badSymlink + "\\\"");
       }
 
-      ContainerLaunch.writeLaunchEnv(fos, env, resources, commands);
+      new DefaultContainerExecutor().writeLaunchEnv(fos, env, resources, commands);
       fos.flush();
       fos.close();
       FileUtil.setExecutable(tempFile, true);
@@ -210,7 +233,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
       } else {
         commands.add("/bin/sh ./\\\"" + symLink + "\\\"");
       }
-      ContainerLaunch.writeLaunchEnv(fos, env, resources, commands);
+      new DefaultContainerExecutor().writeLaunchEnv(fos, env, resources, commands);
       fos.flush();
       fos.close();
       FileUtil.setExecutable(tempFile, true);
@@ -263,7 +286,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
           "\"workflowName\":\"\n\ninsert table " +
           "\npartition (cd_education_status)\nselect cd_demo_sk, cd_gender, " );
       List<String> commands = new ArrayList<String>();
-      ContainerLaunch.writeLaunchEnv(fos, env, resources, commands);
+      new DefaultContainerExecutor().writeLaunchEnv(fos, env, resources, commands);
       fos.flush();
       fos.close();
 
@@ -340,7 +363,8 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
       Map<String, String> env = new HashMap<String, String>();
       List<String> commands = new ArrayList<String>();
       commands.add(command);
-      ContainerLaunch.writeLaunchEnv(fos, env, resources, commands);
+      ContainerExecutor exec = new DefaultContainerExecutor();
+      exec.writeLaunchEnv(fos, env, resources, commands);
       fos.flush();
       fos.close();
 
@@ -368,6 +392,112 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     }
   }
 
+  @Test
+  public void testPrependDistcache() throws Exception {
+
+    // Test is only relevant on Windows
+    Assume.assumeTrue(Shell.WINDOWS);
+
+    ContainerLaunchContext containerLaunchContext =
+        recordFactory.newRecordInstance(ContainerLaunchContext.class);
+
+    ApplicationId appId = ApplicationId.newInstance(0, 0);
+    ApplicationAttemptId appAttemptId =
+        ApplicationAttemptId.newInstance(appId, 1);
+
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, 0);
+    Map<String, String> userSetEnv = new HashMap<String, String>();
+    userSetEnv.put(Environment.CONTAINER_ID.name(), "user_set_container_id");
+    userSetEnv.put(Environment.NM_HOST.name(), "user_set_NM_HOST");
+    userSetEnv.put(Environment.NM_PORT.name(), "user_set_NM_PORT");
+    userSetEnv.put(Environment.NM_HTTP_PORT.name(), "user_set_NM_HTTP_PORT");
+    userSetEnv.put(Environment.LOCAL_DIRS.name(), "user_set_LOCAL_DIR");
+    userSetEnv.put(Environment.USER.key(), "user_set_" +
+      Environment.USER.key());
+    userSetEnv.put(Environment.LOGNAME.name(), "user_set_LOGNAME");
+    userSetEnv.put(Environment.PWD.name(), "user_set_PWD");
+    userSetEnv.put(Environment.HOME.name(), "user_set_HOME");
+    userSetEnv.put(Environment.CLASSPATH.name(), "APATH");
+    containerLaunchContext.setEnvironment(userSetEnv);
+    Container container = mock(Container.class);
+    when(container.getContainerId()).thenReturn(cId);
+    when(container.getLaunchContext()).thenReturn(containerLaunchContext);
+    when(container.getLocalizedResources()).thenReturn(null);
+    Dispatcher dispatcher = mock(Dispatcher.class);
+    EventHandler eventHandler = new EventHandler() {
+      public void handle(Event event) {
+        Assert.assertTrue(event instanceof ContainerExitEvent);
+        ContainerExitEvent exitEvent = (ContainerExitEvent) event;
+        Assert.assertEquals(ContainerEventType.CONTAINER_EXITED_WITH_FAILURE,
+            exitEvent.getType());
+      }
+    };
+    when(dispatcher.getEventHandler()).thenReturn(eventHandler);
+
+    Configuration conf = new Configuration();
+
+    ContainerLaunch launch = new ContainerLaunch(distContext, conf,
+        dispatcher, exec, null, container, dirsHandler, containerManager);
+
+    String testDir = System.getProperty("test.build.data",
+        "target/test-dir");
+    Path pwd = new Path(testDir);
+    List<Path> appDirs = new ArrayList<Path>();
+    List<String> containerLogs = new ArrayList<String>();
+
+    Map<Path, List<String>> resources = new HashMap<Path, List<String>>();
+    Path userjar = new Path("user.jar");
+    List<String> lpaths = new ArrayList<String>();
+    lpaths.add("userjarlink.jar");
+    resources.put(userjar, lpaths);
+
+    Path nmp = new Path(testDir);
+
+    launch.sanitizeEnv(
+      userSetEnv, pwd, appDirs, containerLogs, resources, nmp);
+
+    List<String> result =
+      getJarManifestClasspath(userSetEnv.get(Environment.CLASSPATH.name()));
+
+    Assert.assertTrue(result.size() > 1);
+    Assert.assertTrue(
+      result.get(result.size() - 1).endsWith("userjarlink.jar"));
+
+    //Then, with user classpath first
+    userSetEnv.put(Environment.CLASSPATH_PREPEND_DISTCACHE.name(), "true");
+
+    cId = ContainerId.newContainerId(appAttemptId, 1);
+    when(container.getContainerId()).thenReturn(cId);
+
+    launch = new ContainerLaunch(distContext, conf,
+        dispatcher, exec, null, container, dirsHandler, containerManager);
+
+    launch.sanitizeEnv(
+      userSetEnv, pwd, appDirs, containerLogs, resources, nmp);
+
+    result =
+      getJarManifestClasspath(userSetEnv.get(Environment.CLASSPATH.name()));
+
+    Assert.assertTrue(result.size() > 1);
+    Assert.assertTrue(
+      result.get(0).endsWith("userjarlink.jar"));
+
+  }
+
+  private static List<String> getJarManifestClasspath(String path)
+      throws Exception {
+    List<String> classpath = new ArrayList<String>();
+    JarFile jarFile = new JarFile(path);
+    Manifest manifest = jarFile.getManifest();
+    String cps = manifest.getMainAttributes().getValue("Class-Path");
+    StringTokenizer cptok = new StringTokenizer(cps);
+    while (cptok.hasMoreTokens()) {
+      String cpentry = cptok.nextToken();
+      classpath.add(cpentry);
+    }
+    return classpath;
+  }
+
   /**
    * See if environment variable is forwarded using sanitizeEnv.
    * @throws Exception
@@ -384,7 +514,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     ApplicationAttemptId appAttemptId =
         ApplicationAttemptId.newInstance(appId, 1);
 
-    ContainerId cId = ContainerId.newInstance(appAttemptId, 0);
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, 0);
     Map<String, String> userSetEnv = new HashMap<String, String>();
     userSetEnv.put(Environment.CONTAINER_ID.name(), "user_set_container_id");
     userSetEnv.put(Environment.NM_HOST.name(), "user_set_NM_HOST");
@@ -633,7 +763,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     ApplicationId appId = ApplicationId.newInstance(1, 1);
     ApplicationAttemptId appAttemptId =
         ApplicationAttemptId.newInstance(appId, 1);
-    ContainerId cId = ContainerId.newInstance(appAttemptId, 0);
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, 0);
     File processStartFile =
         new File(tmpDir, "pid.txt").getAbsoluteFile();
 
@@ -770,7 +900,7 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
   @Test (timeout = 10000)
   public void testCallFailureWithNullLocalizedResources() {
     Container container = mock(Container.class);
-    when(container.getContainerId()).thenReturn(ContainerId.newInstance(
+    when(container.getContainerId()).thenReturn(ContainerId.newContainerId(
         ApplicationAttemptId.newInstance(ApplicationId.newInstance(
             System.currentTimeMillis(), 1), 1), 1));
     ContainerLaunchContext clc = mock(ContainerLaunchContext.class);
@@ -968,5 +1098,115 @@ public class TestContainerLaunch extends BaseContainerManagerTest {
     } catch(IOException e) {
       assertThat(e.getMessage(), containsString(expectedMessage));
     }
+  }
+
+  @Test
+  public void testKillProcessGroup() throws Exception {
+    Assume.assumeTrue(Shell.isSetsidAvailable);
+    containerManager.start();
+
+    // Construct the Container-id
+    ApplicationId appId = ApplicationId.newInstance(2, 2);
+    ApplicationAttemptId appAttemptId =
+        ApplicationAttemptId.newInstance(appId, 1);
+    ContainerId cId = ContainerId.newContainerId(appAttemptId, 0);
+    File processStartFile =
+        new File(tmpDir, "pid.txt").getAbsoluteFile();
+    File childProcessStartFile =
+        new File(tmpDir, "child_pid.txt").getAbsoluteFile();
+
+    // setup a script that can handle sigterm gracefully
+    File scriptFile = Shell.appendScriptExtension(tmpDir, "testscript");
+    PrintWriter writer = new PrintWriter(new FileOutputStream(scriptFile));
+    writer.println("#!/bin/bash\n\n");
+    writer.println("echo \"Running testscript for forked process\"");
+    writer.println("umask 0");
+    writer.println("echo $$ >> " + processStartFile);
+    writer.println("while true;\ndo sleep 1s;\ndone > /dev/null 2>&1 &");
+    writer.println("echo $! >> " + childProcessStartFile);
+    writer.println("while true;\ndo sleep 1s;\ndone");
+    writer.close();
+    FileUtil.setExecutable(scriptFile, true);
+
+    ContainerLaunchContext containerLaunchContext =
+        recordFactory.newRecordInstance(ContainerLaunchContext.class);
+
+    // upload the script file so that the container can run it
+    URL resource_alpha =
+        ConverterUtils.getYarnUrlFromPath(localFS
+            .makeQualified(new Path(scriptFile.getAbsolutePath())));
+    LocalResource rsrc_alpha =
+        recordFactory.newRecordInstance(LocalResource.class);
+    rsrc_alpha.setResource(resource_alpha);
+    rsrc_alpha.setSize(-1);
+    rsrc_alpha.setVisibility(LocalResourceVisibility.APPLICATION);
+    rsrc_alpha.setType(LocalResourceType.FILE);
+    rsrc_alpha.setTimestamp(scriptFile.lastModified());
+    String destinationFile = "dest_file.sh";
+    Map<String, LocalResource> localResources =
+        new HashMap<String, LocalResource>();
+    localResources.put(destinationFile, rsrc_alpha);
+    containerLaunchContext.setLocalResources(localResources);
+
+    // set up the rest of the container
+    List<String> commands = Arrays.asList(Shell.getRunScriptCommand(scriptFile));
+    containerLaunchContext.setCommands(commands);
+    Priority priority = Priority.newInstance(10);
+    long createTime = 1234;
+    Token containerToken = createContainerToken(cId, priority, createTime);
+
+    StartContainerRequest scRequest =
+        StartContainerRequest.newInstance(containerLaunchContext,
+            containerToken);
+    List<StartContainerRequest> list = new ArrayList<StartContainerRequest>();
+    list.add(scRequest);
+    StartContainersRequest allRequests =
+        StartContainersRequest.newInstance(list);
+    containerManager.startContainers(allRequests);
+
+    int timeoutSecs = 0;
+    while (!processStartFile.exists() && timeoutSecs++ < 20) {
+      Thread.sleep(1000);
+      LOG.info("Waiting for process start-file to be created");
+    }
+    Assert.assertTrue("ProcessStartFile doesn't exist!",
+        processStartFile.exists());
+
+    BufferedReader reader =
+          new BufferedReader(new FileReader(processStartFile));
+    // Get the pid of the process
+    String pid = reader.readLine().trim();
+    // No more lines
+    Assert.assertEquals(null, reader.readLine());
+    reader.close();
+
+    reader =
+          new BufferedReader(new FileReader(childProcessStartFile));
+    // Get the pid of the child process
+    String child = reader.readLine().trim();
+    // No more lines
+    Assert.assertEquals(null, reader.readLine());
+    reader.close();
+
+    LOG.info("Manually killing pid " + pid + ", but not child pid " + child);
+    Shell.execCommand(new String[]{"kill", "-9", pid});
+
+    BaseContainerManagerTest.waitForContainerState(containerManager, cId,
+        ContainerState.COMPLETE);
+
+    Assert.assertFalse("Process is still alive!",
+        DefaultContainerExecutor.containerIsAlive(pid));
+
+    List<ContainerId> containerIds = new ArrayList<ContainerId>();
+    containerIds.add(cId);
+
+    GetContainerStatusesRequest gcsRequest =
+        GetContainerStatusesRequest.newInstance(containerIds);
+
+    ContainerStatus containerStatus =
+        containerManager.getContainerStatuses(gcsRequest)
+            .getContainerStatuses().get(0);
+    Assert.assertEquals(ExitCode.FORCE_KILLED.getExitCode(),
+        containerStatus.getExitStatus());
   }
 }

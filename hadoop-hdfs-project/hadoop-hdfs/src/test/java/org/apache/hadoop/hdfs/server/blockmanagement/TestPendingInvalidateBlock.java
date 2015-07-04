@@ -17,7 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
-import org.apache.commons.logging.impl.Log4JLogger;
+import java.text.SimpleDateFormat;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.fs.Path;
@@ -27,6 +28,7 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Assert;
@@ -40,7 +42,7 @@ import org.mockito.internal.util.reflection.Whitebox;
  */
 public class TestPendingInvalidateBlock {
   {
-    ((Log4JLogger)BlockManager.LOG).getLogger().setLevel(Level.DEBUG);    
+    GenericTestUtils.setLogLevel(BlockManager.LOG, Level.DEBUG);
   }
 
   private static final int BLOCKSIZE = 1024;
@@ -88,6 +90,15 @@ public class TestPendingInvalidateBlock {
     Thread.sleep(6000);
     Assert.assertEquals(0, cluster.getNamesystem().getBlocksTotal());
     Assert.assertEquals(0, cluster.getNamesystem().getPendingDeletionBlocks());
+    String nnStartedStr = cluster.getNamesystem().getNNStarted();
+    long nnStarted = new SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy")
+        .parse(nnStartedStr).getTime();
+    long blockDeletionStartTime = cluster.getNamesystem()
+        .getBlockDeletionStartTime();
+    Assert.assertTrue(String.format(
+        "Expect blockDeletionStartTime = %d > nnStarted = %d/nnStartedStr = %s.",
+        blockDeletionStartTime, nnStarted, nnStartedStr),
+        blockDeletionStartTime > nnStarted);
   }
 
   /**

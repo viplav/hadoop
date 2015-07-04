@@ -54,7 +54,7 @@
       <comparators>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^-ls \[-d\] \[-h\] \[-R\] \[&lt;path&gt; \.\.\.\] :( |\t)*</expected-output>
+          <expected-output>^-ls \[-C\] \[-d\] \[-h\] \[-R\] \[-t\] \[-S\] \[-r\] \[-u\] \[&lt;path&gt; \.\.\.\] :( |\t)*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
@@ -62,11 +62,15 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*specified, the contents of /user/&lt;currentUser&gt; will be listed. Directory entries( )*</expected-output>
+          <expected-output>^\s*specified, the contents of /user/&lt;currentUser&gt; will be listed. For a directory a( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*are of the form:( )*</expected-output>
+          <expected-output>^( |\t)*list of its direct children is returned \(unless -d option is specified\).*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*Directory entries are of the form:( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
@@ -90,19 +94,43 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
+          <expected-output>^\s*-C\s+Display the paths of files and directories only\.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
           <expected-output>^\s*-d\s+Directories are listed as plain files\.( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*-h\s+Formats the sizes of files in a human-readable fashion rather than a number( )*</expected-output>
+          <expected-output>^\s*-h\s+Formats the sizes of files in a human-readable fashion( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*of bytes\.( )*</expected-output>
+          <expected-output>^\s*rather than a number of bytes\.( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
           <expected-output>^\s*-R\s+Recursively list the contents of directories\.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*-t\s+Sort files by modification time \(most recent first\)\.</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*-S\s+Sort files by size\.</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*-r\s+Reverse the order of the sort\.</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*-u\s+Use time of last access instead of modification for</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*display and sorting\.</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -204,7 +232,7 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*size\s+name\(full path\)\s*</expected-output>
+          <expected-output>^\s*size\s+disk space consumed\s+name\(full path\)\s*</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -238,7 +266,7 @@
       <comparators>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^-count \[-q\] \[-h\] &lt;path&gt; \.\.\. :( )*</expected-output>
+          <expected-output>^-count \[-q\] \[-h\] \[-v\] \[-t \[&lt;storage type&gt;\]\] &lt;path&gt; \.\.\. :( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
@@ -250,19 +278,27 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*DIR_COUNT FILE_COUNT CONTENT_SIZE FILE_NAME or( )*</expected-output>
+          <expected-output>^( |\t)*DIR_COUNT FILE_COUNT CONTENT_SIZE PATHNAME( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*QUOTA REMAINING_QUOTA SPACE_QUOTA REMAINING_SPACE_QUOTA( )*</expected-output>
+          <expected-output>^( |\t)*or, with the -q option:( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*DIR_COUNT FILE_COUNT CONTENT_SIZE FILE_NAME( )*</expected-output>
+          <expected-output>^( |\t)*QUOTA REM_QUOTA SPACE_QUOTA REM_SPACE_QUOTA( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*DIR_COUNT FILE_COUNT CONTENT_SIZE PATHNAME( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
           <expected-output>^( |\t)*The -h option shows file sizes in human readable format.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*The -v option displays a header line.( )*</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -421,7 +457,7 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*\(DEPRECATED\) Same as 'rm -r'\s*</expected-output>
+          <expected-output>^\s*\(DEPRECATED\) Same as '-rm -r'\s*</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -436,7 +472,7 @@
       <comparators>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^-put \[-f\] \[-p\] &lt;localsrc&gt; \.\.\. &lt;dst&gt; :\s*</expected-output>
+          <expected-output>^-put \[-f\] \[-p\] \[-l\] &lt;localsrc&gt; \.\.\. &lt;dst&gt; :( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
@@ -444,15 +480,31 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*exists, unless the -f flag is given.( )*Passing -p preserves access and( )*</expected-output>
+          <expected-output>^\s*exists, unless the -f flag is given.( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^\s*modification times, ownership and the mode. Passing -f overwrites the( )*</expected-output>
+          <expected-output>^\s*Flags:( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*destination if it already exists.( )*</expected-output>
+          <expected-output>^\s*-p  Preserves access and modification times, ownership and the mode.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^\s*-f  Overwrites the destination if it already exists.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^\s*-l  Allow DataNode to lazily persist the file to disk. Forces( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^\s*replication factor of 1. This flag will result in reduced( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^\s*durability. Use with care.( )*</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -467,7 +519,7 @@
       <comparators>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^-copyFromLocal \[-f\] \[-p\] &lt;localsrc&gt; \.\.\. &lt;dst&gt; :\s*</expected-output>
+          <expected-output>^-copyFromLocal \[-f\] \[-p\] \[-l\] &lt;localsrc&gt; \.\.\. &lt;dst&gt; :\s*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
@@ -770,19 +822,35 @@
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*Print statistics about the file/directory at &lt;path&gt; in the specified format.( )*</expected-output>
+          <expected-output>^( |\t)*Print statistics about the file/directory at &lt;path&gt;( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*Format accepts filesize in blocks \(%b\), group name of owner\(%g\), filename \(%n\),( )*</expected-output>
+          <expected-output>^( |\t)*in the specified format. Format accepts filesize in( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*block size \(%o\), replication \(%r\), user name of owner\(%u\), modification date( )*</expected-output>
+          <expected-output>^( |\t)*blocks \(%b\), type \(%F\), group name of owner \(%g\),( )*</expected-output>
         </comparator>
         <comparator>
           <type>RegexpComparator</type>
-          <expected-output>^( |\t)*\(%y, %Y\)( )*</expected-output>
+          <expected-output>^( |\t)*name \(%n\), block size \(%o\), replication \(%r\), user name( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*of owner \(%u\), modification date \(%y, %Y\).( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*%y shows UTC date as "yyyy-MM-dd HH:mm:ss" and( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*%Y shows milliseconds since January 1, 1970 UTC.( )*</expected-output>
+        </comparator>
+        <comparator>
+          <type>RegexpComparator</type>
+          <expected-output>^( |\t)*If the format is not specified, %y is used by default.( )*</expected-output>
         </comparator>
       </comparators>
     </test>
@@ -943,6 +1011,50 @@
         <comparator>
           <type>RegexpComparator</type>
           <expected-output>^( |\t)*This is equivalent to -chown ... :GROUP ...( )*</expected-output>
+        </comparator>
+      </comparators>
+    </test>
+
+    <test> <!-- TESTED -->
+      <description>help: help for find</description>
+      <test-commands>
+        <command>-help find</command>
+      </test-commands>
+      <cleanup-commands>
+      </cleanup-commands>
+      <comparators>
+        <comparator>
+          <type>RegexpAcrossOutputComparator</type>
+          <expected-output>-find &lt;path&gt; \.\.\. &lt;expression&gt; \.\.\. :
+  Finds all files that match the specified expression and
+  applies selected actions to them\. If no &lt;path&gt; is specified
+  then defaults to the current working directory\. If no
+  expression is specified then defaults to -print\.
+  
+  The following primary expressions are recognised:
+    -name pattern
+    -iname pattern
+      Evaluates as true if the basename of the file matches the
+      pattern using standard file system globbing\.
+      If -iname is used then the match is case insensitive\.
+  
+    -print
+    -print0
+      Always evaluates to true. Causes the current pathname to be
+      written to standard output followed by a newline. If the -print0
+      expression is used then an ASCII NULL character is appended rather
+      than a newline.
+  
+  The following operators are recognised:
+    expression -a expression
+    expression -and expression
+    expression expression
+      Logical AND operator for joining two expressions\. Returns
+      true if both child expressions return true\. Implied by the
+      juxtaposition of two expressions and so does not need to be
+      explicitly specified\. The second expression will not be
+      applied if the first fails\.
+</expected-output>	
         </comparator>
       </comparators>
     </test>

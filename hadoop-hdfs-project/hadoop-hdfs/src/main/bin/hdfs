@@ -17,7 +17,8 @@
 
 function hadoop_usage
 {
-  echo "Usage: hdfs [--config confdir] [--daemon (start|stop|status)] COMMAND"
+  echo "Usage: hdfs [--config confdir] [--daemon (start|stop|status)]"
+  echo "           [--loglevel loglevel] COMMAND"
   echo "       where COMMAND is one of:"
   echo "  balancer             run a cluster balancing utility"
   echo "  cacheadmin           configure the HDFS cache"
@@ -25,6 +26,7 @@ function hadoop_usage
   echo "                       Hadoop jar and the required libraries"
   echo "  crypto               configure HDFS encryption zones"
   echo "  datanode             run a DFS datanode"
+  echo "  debug                run a Debug Admin to execute HDFS debug commands"
   echo "  dfs                  run a filesystem command on the file system"
   echo "  dfsadmin             run a DFS admin client"
   echo "  fetchdt              fetch a delegation token from the NameNode"
@@ -48,9 +50,12 @@ function hadoop_usage
   echo "  secondarynamenode    run the DFS secondary namenode"
   echo "  snapshotDiff         diff two snapshots of a directory or diff the"
   echo "                       current directory contents with a snapshot"
+  echo "  storagepolicies      list/get/set block storage policies"
+  echo "  version              print the version"
   echo "  zkfc                 run the ZK Failover Controller daemon"
   echo ""
   echo "Most commands print help when invoked w/o parameters."
+  # There are also debug commands, but they don't show up in this listing.
 }
 
 # let's locate libexec...
@@ -81,6 +86,7 @@ shift
 
 case ${COMMAND} in
   balancer)
+    supportdaemonization="true"
     CLASS=org.apache.hadoop.hdfs.server.balancer.Balancer
     hadoop_debug "Appending HADOOP_BALANCER_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_BALANCER_OPTS}"
@@ -89,15 +95,13 @@ case ${COMMAND} in
     CLASS=org.apache.hadoop.hdfs.tools.CacheAdmin
   ;;
   classpath)
-    hadoop_finalize
-    echo "${CLASSPATH}"
-    exit
+    hadoop_do_classpath_subcommand CLASS "$@"
   ;;
   crypto)
     CLASS=org.apache.hadoop.hdfs.tools.CryptoAdmin
   ;;
   datanode)
-    daemon="true"
+    supportdaemonization="true"
     # Determine if we're starting a secure datanode, and
     # if so, redefine appropriate variables
     if [[ -n "${HADOOP_SECURE_DN_USER}" ]]; then
@@ -117,6 +121,9 @@ case ${COMMAND} in
       HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_DATANODE_OPTS}"
       CLASS='org.apache.hadoop.hdfs.server.datanode.DataNode'
     fi
+  ;;
+  debug)
+    CLASS='org.apache.hadoop.hdfs.tools.DebugAdmin'
   ;;
   dfs)
     CLASS=org.apache.hadoop.fs.FsShell
@@ -150,7 +157,7 @@ case ${COMMAND} in
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_CLIENT_OPTS}"
   ;;
   journalnode)
-    daemon="true"
+    supportdaemonization="true"
     CLASS='org.apache.hadoop.hdfs.qjournal.server.JournalNode'
     hadoop_debug "Appending HADOOP_JOURNALNODE_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_JOURNALNODE_OPTS}"
@@ -162,18 +169,20 @@ case ${COMMAND} in
     CLASS=org.apache.hadoop.hdfs.tools.snapshot.LsSnapshottableDir
   ;;
   mover)
+    supportdaemonization="true"
     CLASS=org.apache.hadoop.hdfs.server.mover.Mover
     hadoop_debug "Appending HADOOP_MOVER_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_MOVER_OPTS}"
   ;;
   namenode)
-    daemon="true"
+    supportdaemonization="true"
     CLASS='org.apache.hadoop.hdfs.server.namenode.NameNode'
     hadoop_debug "Appending HADOOP_NAMENODE_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_NAMENODE_OPTS}"
+    hadoop_add_param HADOOP_OPTS hdfs.audit.logger "-Dhdfs.audit.logger=${HDFS_AUDIT_LOGGER}"
   ;;
   nfs3)
-    daemon="true"
+    supportdaemonization="true"
     if [[ -n "${HADOOP_PRIVILEGED_NFS_USER}" ]]; then
       secure_service="true"
       secure_user="${HADOOP_PRIVILEGED_NFS_USER}"
@@ -202,22 +211,29 @@ case ${COMMAND} in
     CLASS=org.apache.hadoop.hdfs.tools.offlineImageViewer.OfflineImageViewer
   ;;
   portmap)
-    daemon="true"
+    supportdaemonization="true"
     CLASS=org.apache.hadoop.portmap.Portmap
     hadoop_debug "Appending HADOOP_PORTMAP_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_PORTMAP_OPTS}"
   ;;
   secondarynamenode)
-    daemon="true"
+    supportdaemonization="true"
     CLASS='org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode'
     hadoop_debug "Appending HADOOP_SECONDARYNAMENODE_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_SECONDARYNAMENODE_OPTS}"
+    hadoop_add_param HADOOP_OPTS hdfs.audit.logger "-Dhdfs.audit.logger=${HDFS_AUDIT_LOGGER}"
   ;;
   snapshotDiff)
     CLASS=org.apache.hadoop.hdfs.tools.snapshot.SnapshotDiff
   ;;
+  storagepolicies)
+    CLASS=org.apache.hadoop.hdfs.tools.StoragePolicyAdmin
+  ;;
+  version)
+    CLASS=org.apache.hadoop.util.VersionInfo
+  ;;
   zkfc)
-    daemon="true"
+    supportdaemonization="true"
     CLASS='org.apache.hadoop.hdfs.tools.DFSZKFailoverController'
     hadoop_debug "Appending HADOOP_ZKFC_OPTS onto HADOOP_OPTS"
     HADOOP_OPTS="${HADOOP_OPTS} ${HADOOP_ZKFC_OPTS}"
@@ -230,13 +246,20 @@ case ${COMMAND} in
   ;;
 esac
 
+hadoop_verify_user "${COMMAND}"
+
+if [[ ${HADOOP_SLAVE_MODE} = true ]]; then
+  hadoop_common_slave_mode_execute "${HADOOP_HDFS_HOME}/bin/hdfs" "${HADOOP_USER_PARAMS[@]}"
+  exit $?
+fi
+
 if [[ -n "${secure_service}" ]]; then
   HADOOP_SECURE_USER="${secure_user}"
   hadoop_verify_secure_prereq
   hadoop_setup_secure_service
-  priv_outfile="${HADOOP_LOG_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND-$HOSTNAME}.out"
-  priv_errfile="${HADOOP_LOG_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND-$HOSTNAME}.err"
-  priv_pidfile="${HADOOP_PID_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND-$HOSTNAME}.pid"
+  priv_outfile="${HADOOP_LOG_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND}-${HOSTNAME}.out"
+  priv_errfile="${HADOOP_LOG_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND}-${HOSTNAME}.err"
+  priv_pidfile="${HADOOP_PID_DIR}/privileged-${HADOOP_IDENT_STRING}-${COMMAND}.pid"
   daemon_outfile="${HADOOP_LOG_DIR}/hadoop-${HADOOP_SECURE_USER}-${HADOOP_IDENT_STRING}-${COMMAND}-${HOSTNAME}.out"
   daemon_pidfile="${HADOOP_PID_DIR}/hadoop-${HADOOP_SECURE_USER}-${HADOOP_IDENT_STRING}-${COMMAND}.pid"
 else
@@ -256,10 +279,17 @@ if [[ "${HADOOP_DAEMON_MODE}" != "default" ]]; then
   fi
 fi
 
-hadoop_add_param HADOOP_OPTS Xmx "${JAVA_HEAP_MAX}"
 hadoop_finalize
 
-if [[ -n "${daemon}" ]]; then
+if [[ -n "${supportdaemonization}" ]]; then
+  if [[ "${COMMAND}" == "namenode" ]] &&
+     [[ "${HADOOP_DAEMON_MODE}" == "stop" ]]; then
+    hadoop_debug "Do checkpoint if necessary before stopping NameNode"
+    export CLASSPATH
+    "${JAVA}" "-Dproc_dfsadmin" ${HADOOP_OPTS} "org.apache.hadoop.hdfs.tools.DFSAdmin" "-safemode" "enter"
+    "${JAVA}" "-Dproc_dfsadmin" ${HADOOP_OPTS} "org.apache.hadoop.hdfs.tools.DFSAdmin" "-saveNamespace" "-beforeShutdown"
+    "${JAVA}" "-Dproc_dfsadmin" ${HADOOP_OPTS} "org.apache.hadoop.hdfs.tools.DFSAdmin" "-safemode" "leave"
+  fi
   if [[ -n "${secure_service}" ]]; then
     hadoop_secure_daemon_handler \
     "${HADOOP_DAEMON_MODE}" "${COMMAND}" "${CLASS}"\

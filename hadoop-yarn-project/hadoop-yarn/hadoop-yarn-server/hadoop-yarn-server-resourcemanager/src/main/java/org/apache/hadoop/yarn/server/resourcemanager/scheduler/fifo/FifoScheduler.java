@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 import org.apache.commons.logging.Log;
@@ -53,6 +54,7 @@ import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
@@ -187,6 +189,26 @@ public class FifoScheduler extends
       updateAppHeadRoom(schedulerAttempt);
       updateAvailableResourcesMetrics();
     }
+
+    @Override
+    public Set<String> getAccessibleNodeLabels() {
+      // TODO add implementation for FIFO scheduler
+      return null;
+    }
+
+    @Override
+    public String getDefaultNodeLabelExpression() {
+      // TODO add implementation for FIFO scheduler
+      return null;
+    }
+
+    @Override
+    public void incPendingResource(String nodeLabel, Resource resourceToInc) {
+    }
+
+    @Override
+    public void decPendingResource(String nodeLabel, Resource resourceToDec) {
+    }
   };
 
   public FifoScheduler() {
@@ -202,10 +224,13 @@ public class FifoScheduler extends
         Resources.createResource(conf.getInt(
             YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
             YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB));
-    this.maximumAllocation =
+    initMaximumResourceCapability(
         Resources.createResource(conf.getInt(
             YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB,
-            YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_MB));
+            YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_MB),
+          conf.getInt(
+            YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES,
+            YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES)));
     this.usePortForNodeName = conf.getBoolean(
         YarnConfiguration.RM_SCHEDULER_INCLUDE_PORT_IN_NODE_NAME,
         YarnConfiguration.DEFAULT_RM_SCHEDULER_USE_PORT_FOR_NODE_NAME);
@@ -290,7 +315,7 @@ public class FifoScheduler extends
 
     // Sanity check
     SchedulerUtils.normalizeRequests(ask, resourceCalculator, 
-        clusterResource, minimumAllocation, maximumAllocation);
+        clusterResource, minimumAllocation, getMaximumResourceCapability());
 
     // Release containers
     releaseContainers(release, application);
@@ -327,9 +352,10 @@ public class FifoScheduler extends
       application.updateBlacklist(blacklistAdditions, blacklistRemovals);
       ContainersAndNMTokensAllocation allocation =
           application.pullNewlyAllocatedContainersAndNMTokens();
-      return new Allocation(allocation.getContainerList(),
-        application.getHeadroom(), null, null, null,
-        allocation.getNMTokenList());
+      Resource headroom = application.getHeadroom();
+      application.setApplicationHeadroomForMetrics(headroom);
+      return new Allocation(allocation.getContainerList(), headroom, null,
+          null, null, allocation.getNMTokenList());
     }
   }
 
@@ -853,7 +879,8 @@ public class FifoScheduler extends
     }
 
     // Inform the application
-    application.containerCompleted(rmContainer, containerStatus, event);
+    application.containerCompleted(rmContainer, containerStatus, event,
+        RMNodeLabelsManager.NO_LABEL);
 
     // Inform the node
     node.releaseContainer(container);
@@ -886,6 +913,7 @@ public class FifoScheduler extends
     
     //Remove the node
     this.nodes.remove(nodeInfo.getNodeID());
+    updateMaximumAllocation(node, false);
     
     // Update cluster metrics
     Resources.subtractFrom(clusterResource, node.getRMNode().getTotalCapability());
@@ -902,10 +930,17 @@ public class FifoScheduler extends
     return DEFAULT_QUEUE.getQueueUserAclInfo(null); 
   }
 
+  @Override
+  public ResourceCalculator getResourceCalculator() {
+    return resourceCalculator;
+  }
+
   private synchronized void addNode(RMNode nodeManager) {
-    this.nodes.put(nodeManager.getNodeID(), new FiCaSchedulerNode(nodeManager,
-        usePortForNodeName));
+    FiCaSchedulerNode schedulerNode = new FiCaSchedulerNode(nodeManager,
+        usePortForNodeName);
+    this.nodes.put(nodeManager.getNodeID(), schedulerNode);
     Resources.addTo(clusterResource, nodeManager.getTotalCapability());
+    updateMaximumAllocation(schedulerNode, true);
   }
 
   @Override

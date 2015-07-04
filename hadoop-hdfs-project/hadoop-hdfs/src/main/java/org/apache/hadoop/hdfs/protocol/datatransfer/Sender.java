@@ -25,7 +25,7 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.hdfs.StorageType;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.CachingStrategyProto;
@@ -48,8 +48,8 @@ import org.apache.hadoop.hdfs.shortcircuit.ShortCircuitShm.SlotId;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
 
-import org.htrace.Trace;
-import org.htrace.Span;
+import org.apache.htrace.Trace;
+import org.apache.htrace.Span;
 
 import com.google.protobuf.Message;
 
@@ -128,7 +128,10 @@ public class Sender implements DataTransferProtocol {
       final long maxBytesRcvd,
       final long latestGenerationStamp,
       DataChecksum requestedChecksum,
-      final CachingStrategy cachingStrategy) throws IOException {
+      final CachingStrategy cachingStrategy,
+      final boolean allowLazyPersist,
+      final boolean pinning,
+      final boolean[] targetPinnings) throws IOException {
     ClientOperationHeaderProto header = DataTransferProtoUtil.buildClientHeader(
         blk, clientName, blockToken);
     
@@ -146,7 +149,10 @@ public class Sender implements DataTransferProtocol {
       .setMaxBytesRcvd(maxBytesRcvd)
       .setLatestGenerationStamp(latestGenerationStamp)
       .setRequestedChecksum(checksumProto)
-      .setCachingStrategy(getCachingStrategy(cachingStrategy));
+      .setCachingStrategy(getCachingStrategy(cachingStrategy))
+      .setAllowLazyPersist(allowLazyPersist)
+      .setPinning(pinning)
+      .addAllTargetPinnings(PBHelper.convert(targetPinnings, 1));
     
     if (source != null) {
       proto.setSource(PBHelper.convertDatanodeInfo(source));
@@ -175,7 +181,8 @@ public class Sender implements DataTransferProtocol {
   @Override
   public void requestShortCircuitFds(final ExtendedBlock blk,
       final Token<BlockTokenIdentifier> blockToken,
-      SlotId slotId, int maxVersion) throws IOException {
+      SlotId slotId, int maxVersion, boolean supportsReceiptVerification)
+        throws IOException {
     OpRequestShortCircuitAccessProto.Builder builder =
         OpRequestShortCircuitAccessProto.newBuilder()
           .setHeader(DataTransferProtoUtil.buildBaseHeader(
@@ -183,6 +190,7 @@ public class Sender implements DataTransferProtocol {
     if (slotId != null) {
       builder.setSlotId(PBHelper.convert(slotId));
     }
+    builder.setSupportsReceiptVerification(supportsReceiptVerification);
     OpRequestShortCircuitAccessProto proto = builder.build();
     send(out, Op.REQUEST_SHORT_CIRCUIT_FDS, proto);
   }

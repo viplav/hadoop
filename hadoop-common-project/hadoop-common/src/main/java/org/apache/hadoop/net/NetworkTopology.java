@@ -393,17 +393,16 @@ public class NetworkTopology {
    */
   public void add(Node node) {
     if (node==null) return;
-    String oldTopoStr = this.toString();
-    if( node instanceof InnerNode ) {
-      throw new IllegalArgumentException(
-        "Not allow to add an inner node: "+NodeBase.getPath(node));
-    }
     int newDepth = NodeBase.locationToDepth(node.getNetworkLocation()) + 1;
     netlock.writeLock().lock();
     try {
+      if( node instanceof InnerNode ) {
+        throw new IllegalArgumentException(
+          "Not allow to add an inner node: "+NodeBase.getPath(node));
+      }
       if ((depthOfAllLeaves != -1) && (depthOfAllLeaves != newDepth)) {
         LOG.error("Error: can't add leaf node " + NodeBase.getPath(node) +
-            " at depth " + newDepth + " to topology:\n" + oldTopoStr);
+            " at depth " + newDepth + " to topology:\n" + this.toString());
         throw new InvalidTopologyException("Failed to add " + NodeBase.getPath(node) +
             ": You cannot have a rack and a non-rack node at the same " +
             "level of the network topology.");
@@ -673,27 +672,11 @@ public class NetworkTopology {
     return node1.getParent()==node2.getParent();
   }
 
-  private static final ThreadLocal<Random> r = new ThreadLocal<Random>();
-
-  /**
-   * Getter for thread-local Random, which provides better performance than
-   * a shared Random (even though Random is thread-safe).
-   *
-   * @return Thread-local Random.
-   */
-  protected Random getRandom() {
-    Random rand = r.get();
-    if (rand == null) {
-      rand = new Random();
-      r.set(rand);
-    }
-    return rand;
-  }
+  private static final Random r = new Random();
 
   @VisibleForTesting
   void setRandomSeed(long seed) {
-    Random rand = getRandom();
-    rand.setSeed(seed);
+    r.setSeed(seed);
   }
 
   /** randomly choose one node from <i>scope</i>
@@ -745,7 +728,7 @@ public class NetworkTopology {
           "Failed to find datanode (scope=\"" + String.valueOf(scope) +
           "\" excludedScope=\"" + String.valueOf(excludedScope) + "\").");
     }
-    int leaveIndex = getRandom().nextInt(numOfDatanodes);
+    int leaveIndex = r.nextInt(numOfDatanodes);
     return innerNode.getLeaf(leaveIndex, node);
   }
 
@@ -875,7 +858,7 @@ public class NetworkTopology {
     // Start off by initializing to off rack
     int weight = 2;
     if (reader != null) {
-      if (reader == node) {
+      if (reader.equals(node)) {
         weight = 0;
       } else if (isOnSameRack(reader, node)) {
         weight = 1;
@@ -918,11 +901,10 @@ public class NetworkTopology {
       list.add(node);
     }
 
-    Random rand = getRandom();
     int idx = 0;
     for (List<Node> list: tree.values()) {
       if (list != null) {
-        Collections.shuffle(list, rand);
+        Collections.shuffle(list, r);
         for (Node n: list) {
           nodes[idx] = n;
           idx++;

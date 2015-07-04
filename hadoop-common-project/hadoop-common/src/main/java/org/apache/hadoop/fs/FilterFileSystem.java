@@ -21,6 +21,7 @@ package org.apache.hadoop.fs;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -179,9 +180,28 @@ public class FilterFileSystem extends FileSystem {
     return fs.create(f, permission,
         overwrite, bufferSize, replication, blockSize, progress);
   }
-  
 
-  
+  @Override
+  public FSDataOutputStream create(Path f,
+        FsPermission permission,
+        EnumSet<CreateFlag> flags,
+        int bufferSize,
+        short replication,
+        long blockSize,
+        Progressable progress,
+        ChecksumOpt checksumOpt) throws IOException {
+    return fs.create(f, permission,
+      flags, bufferSize, replication, blockSize, progress, checksumOpt);
+  }
+
+  @Override
+  protected RemoteIterator<LocatedFileStatus> listLocatedStatus(final Path f,
+      final PathFilter filter)
+  throws FileNotFoundException, IOException {
+    return fs.listLocatedStatus(f, filter);
+  }
+
+
   @Override
   @Deprecated
   public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
@@ -214,6 +234,11 @@ public class FilterFileSystem extends FileSystem {
   public boolean rename(Path src, Path dst) throws IOException {
     return fs.rename(src, dst);
   }
+
+  @Override
+  public boolean truncate(Path f, final long newLength) throws IOException {
+    return fs.truncate(f, newLength);
+  }
   
   /** Delete a file */
   @Override
@@ -240,6 +265,13 @@ public class FilterFileSystem extends FileSystem {
     return fs.listLocatedStatus(f);
   }
   
+  /** Return a remote iterator for listing in a directory */
+  @Override
+  public RemoteIterator<FileStatus> listStatusIterator(Path f)
+  throws IOException {
+    return fs.listStatusIterator(f);
+   }
+
   @Override
   public Path getHomeDirectory() {
     return fs.getHomeDirectory();
@@ -587,5 +619,17 @@ public class FilterFileSystem extends FileSystem {
   @Override
   public void removeXAttr(Path path, String name) throws IOException {
     fs.removeXAttr(path, name);
+  }
+
+  @Override
+  public void setStoragePolicy(Path src, String policyName)
+      throws IOException {
+    fs.setStoragePolicy(src, policyName);
+  }
+
+  @Override
+  public Collection<? extends BlockStoragePolicySpi> getAllStoragePolicies()
+      throws IOException {
+    return fs.getAllStoragePolicies();
   }
 }

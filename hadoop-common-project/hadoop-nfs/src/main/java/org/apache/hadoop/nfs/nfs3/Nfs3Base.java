@@ -29,7 +29,6 @@ import static org.apache.hadoop.util.ExitUtil.terminate;
 
 /**
  * Nfs server. Supports NFS v3 using {@link RpcProgram}.
- * Currently Mountd program is also started inside this class.
  * Only TCP server is supported and UDP is not supported.
  */
 public abstract class Nfs3Base {
@@ -50,12 +49,12 @@ public abstract class Nfs3Base {
     startTCPServer(); // Start TCP server
 
     if (register) {
-      ShutdownHookManager.get().addShutdownHook(new Unregister(),
+      ShutdownHookManager.get().addShutdownHook(new NfsShutdownHook(),
           SHUTDOWN_HOOK_PRIORITY);
       try {
         rpcProgram.register(PortmapMapping.TRANSPORT_TCP, nfsBoundPort);
       } catch (Throwable e) {
-        LOG.fatal("Failed to start the server. Cause:", e);
+        LOG.fatal("Failed to register the NFSv3 service.", e);
         terminate(1, e);
       }
     }
@@ -65,7 +64,17 @@ public abstract class Nfs3Base {
     SimpleTcpServer tcpServer = new SimpleTcpServer(rpcProgram.getPort(),
         rpcProgram, 0);
     rpcProgram.startDaemons();
-    tcpServer.run();
+    try {
+      tcpServer.run();
+    } catch (Throwable e) {
+      LOG.fatal("Failed to start the TCP server.", e);
+      if (tcpServer.getBoundPort() > 0) {
+        rpcProgram.unregister(PortmapMapping.TRANSPORT_TCP,
+            tcpServer.getBoundPort());
+      }
+      tcpServer.shutdown();
+      terminate(1, e);
+    }
     nfsBoundPort = tcpServer.getBoundPort();
   }
 
@@ -74,10 +83,11 @@ public abstract class Nfs3Base {
    */
   public static final int SHUTDOWN_HOOK_PRIORITY = 10;
 
-  private class Unregister implements Runnable {
+  private class NfsShutdownHook implements Runnable {
     @Override
     public synchronized void run() {
       rpcProgram.unregister(PortmapMapping.TRANSPORT_TCP, nfsBoundPort);
+      rpcProgram.stopDaemons();
     }
   }
 }

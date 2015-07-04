@@ -64,6 +64,10 @@ if "%1" == "--config" (
   shift
   shift
 )
+if "%1" == "--loglevel" (
+  shift
+  shift
+)
 
 :main
   if exist %YARN_CONF_DIR%\yarn-env.cmd (
@@ -138,13 +142,16 @@ if "%1" == "--config" (
   set CLASSPATH=%CLASSPATH%;%HADOOP_YARN_HOME%\%YARN_LIB_JARS_DIR%\*
 
   if %yarn-command% == classpath (
-    @echo %CLASSPATH%
-    goto :eof
+    if not defined yarn-command-arguments (
+      @rem No need to bother starting up a JVM for this simple case.
+      @echo %CLASSPATH%
+      exit /b
+    )
   )
 
   set yarncommands=resourcemanager nodemanager proxyserver rmadmin version jar ^
-     application applicationattempt container node logs daemonlog historyserver ^
-     timelineserver
+     application applicationattempt container node queue logs daemonlog historyserver ^
+     timelineserver classpath
   for %%i in ( %yarncommands% ) do (
     if %yarn-command% == %%i set yarncommand=true
   )
@@ -165,7 +172,7 @@ if "%1" == "--config" (
 goto :eof
 
 :classpath
-  @echo %CLASSPATH%
+  set CLASS=org.apache.hadoop.util.Classpath
   goto :eof
 
 :rmadmin
@@ -185,6 +192,11 @@ goto :eof
   set yarn-command-arguments=%yarn-command% %yarn-command-arguments%
   goto :eof
 
+:cluster
+  set CLASS=org.apache.hadoop.yarn.client.cli.ClusterCLI
+  set YARN_OPTS=%YARN_OPTS% %YARN_CLIENT_OPTS%
+  goto :eof
+
 :container
   set CLASS=org.apache.hadoop.yarn.client.cli.ApplicationCLI
   set YARN_OPTS=%YARN_OPTS% %YARN_CLIENT_OPTS%
@@ -193,6 +205,11 @@ goto :eof
 
 :node
   set CLASS=org.apache.hadoop.yarn.client.cli.NodeCLI
+  set YARN_OPTS=%YARN_OPTS% %YARN_CLIENT_OPTS%
+  goto :eof
+
+:queue
+  set CLASS=org.apache.hadoop.yarn.client.cli.QueueCLI
   set YARN_OPTS=%YARN_OPTS% %YARN_CLIENT_OPTS%
   goto :eof
 
@@ -268,6 +285,10 @@ goto :eof
     shift
     shift
   )
+  if "%1" == "--loglevel" (
+    shift
+    shift
+  )
   if [%2] == [] goto :eof
   shift
   set _yarnarguments=
@@ -286,7 +307,7 @@ goto :eof
   goto :eof
 
 :print_usage
-  @echo Usage: yarn [--config confdir] COMMAND
+  @echo Usage: yarn [--config confdir] [--loglevel loglevel] COMMAND
   @echo        where COMMAND is one of:
   @echo   resourcemanager      run the ResourceManager
   @echo   nodemanager          run a nodemanager on each slave
@@ -296,8 +317,10 @@ goto :eof
   @echo   jar ^<jar^>          run a jar file
   @echo   application          prints application(s) report/kill application
   @echo   applicationattempt   prints applicationattempt(s) report
+  @echo   cluster              prints cluster information
   @echo   container            prints container(s) report
   @echo   node                 prints node report(s)
+  @echo   queue                prints queue information
   @echo   logs                 dump container logs
   @echo   classpath            prints the class path needed to get the
   @echo                        Hadoop jar and the required libraries

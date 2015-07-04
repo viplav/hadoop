@@ -27,7 +27,6 @@ import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 import java.util.ServiceLoader;
 
 import javax.security.auth.kerberos.KerberosPrincipal;
@@ -44,6 +43,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenInfo;
+import org.apache.hadoop.util.StringUtils;
 
 
 //this will need to be replaced someday when there is a suitable replacement
@@ -57,6 +57,8 @@ import com.google.common.annotations.VisibleForTesting;
 public class SecurityUtil {
   public static final Log LOG = LogFactory.getLog(SecurityUtil.class);
   public static final String HOSTNAME_PATTERN = "_HOST";
+  public static final String FAILED_TO_GET_UGI_MSG_HEADER = 
+      "Failed to obtain user group information:";
 
   // controls whether buildTokenService will use an ip or host/ip as given
   // by the user
@@ -180,7 +182,8 @@ public class SecurityUtil {
     if (fqdn == null || fqdn.isEmpty() || fqdn.equals("0.0.0.0")) {
       fqdn = getLocalHostName();
     }
-    return components[0] + "/" + fqdn.toLowerCase(Locale.US) + "@" + components[2];
+    return components[0] + "/" +
+        StringUtils.toLowerCase(fqdn) + "@" + components[2];
   }
   
   static String getLocalHostName() throws UnknownHostException {
@@ -377,7 +380,7 @@ public class SecurityUtil {
       }
       host = addr.getAddress().getHostAddress();
     } else {
-      host = addr.getHostName().toLowerCase();
+      host = StringUtils.toLowerCase(addr.getHostName());
     }
     return new Text(host + ":" + addr.getPort());
   }
@@ -604,7 +607,8 @@ public class SecurityUtil {
   public static AuthenticationMethod getAuthenticationMethod(Configuration conf) {
     String value = conf.get(HADOOP_SECURITY_AUTHENTICATION, "simple");
     try {
-      return Enum.valueOf(AuthenticationMethod.class, value.toUpperCase(Locale.ENGLISH));
+      return Enum.valueOf(AuthenticationMethod.class,
+          StringUtils.toUpperCase(value));
     } catch (IllegalArgumentException iae) {
       throw new IllegalArgumentException("Invalid attribute value for " +
           HADOOP_SECURITY_AUTHENTICATION + " of " + value);
@@ -617,6 +621,21 @@ public class SecurityUtil {
       authenticationMethod = AuthenticationMethod.SIMPLE;
     }
     conf.set(HADOOP_SECURITY_AUTHENTICATION,
-             authenticationMethod.toString().toLowerCase(Locale.ENGLISH));
+        StringUtils.toLowerCase(authenticationMethod.toString()));
+  }
+
+  /*
+   * Check if a given port is privileged.
+   * The ports with number smaller than 1024 are treated as privileged ports in
+   * unix/linux system. For other operating systems, use this method with care.
+   * For example, Windows doesn't have the concept of privileged ports.
+   * However, it may be used at Windows client to check port of linux server.
+   * 
+   * @param port the port number
+   * @return true for privileged ports, false otherwise
+   * 
+   */
+  public static boolean isPrivilegedPort(final int port) {
+    return port < 1024;
   }
 }

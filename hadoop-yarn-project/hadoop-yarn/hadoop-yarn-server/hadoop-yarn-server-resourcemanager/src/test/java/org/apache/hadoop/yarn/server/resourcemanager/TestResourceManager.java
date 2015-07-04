@@ -57,6 +57,7 @@ public class TestResourceManager {
   @Before
   public void setUp() throws Exception {
     Configuration conf = new YarnConfiguration();
+    UserGroupInformation.setConfiguration(conf);
     resourceManager = new ResourceManager();
     resourceManager.init(conf);
     resourceManager.getRMContext().getContainerTokenSecretManager().rollMasterKey();
@@ -211,9 +212,8 @@ public class TestResourceManager {
   public void testResourceManagerInitConfigValidation() throws Exception {
     Configuration conf = new YarnConfiguration();
     conf.setInt(YarnConfiguration.RM_AM_MAX_ATTEMPTS, -1);
-    resourceManager = new ResourceManager();
     try {
-      resourceManager.init(conf);
+      resourceManager = new MockRM(conf);
       fail("Exception is expected because the global max attempts" +
           " is negative.");
     } catch (YarnRuntimeException e) {
@@ -228,9 +228,8 @@ public class TestResourceManager {
     Configuration conf = new YarnConfiguration();
     conf.setLong(YarnConfiguration.RM_NM_EXPIRY_INTERVAL_MS, 1000);
     conf.setLong(YarnConfiguration.RM_NM_HEARTBEAT_INTERVAL_MS, 1001);
-    resourceManager = new ResourceManager();;
     try {
-      resourceManager.init(conf);
+      resourceManager = new MockRM(conf);
     } catch (YarnRuntimeException e) {
       // Exception is expected.
       if (!e.getMessage().startsWith("Nodemanager expiry interval should be no"
@@ -254,7 +253,12 @@ public class TestResourceManager {
             AuthenticationFilterInitializer.class.getName() + ", "
                 + this.getClass().getName() };
     for (String filterInitializer : filterInitializers) {
-      resourceManager = new ResourceManager();
+      resourceManager = new ResourceManager() {
+        @Override
+        protected void doSecureLogin() throws IOException {
+          // Skip the login.
+        }
+      };
       Configuration conf = new YarnConfiguration();
       conf.set(filterInitializerConfKey, filterInitializer);
       conf.set("hadoop.security.authentication", "kerberos");

@@ -44,9 +44,9 @@ import java.util.Set;
 
 import javax.security.auth.Subject;
 import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.kerberos.KerberosKey;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
+import javax.security.auth.kerberos.KeyTab;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag;
 import javax.security.auth.login.LoginContext;
@@ -88,9 +88,21 @@ public class UserGroupInformation {
    * Percentage of the ticket window to use before we renew ticket.
    */
   private static final float TICKET_RENEW_WINDOW = 0.80f;
+  private static boolean shouldRenewImmediatelyForTests = false;
   static final String HADOOP_USER_NAME = "HADOOP_USER_NAME";
   static final String HADOOP_PROXY_USER = "HADOOP_PROXY_USER";
-  
+
+  /**
+   * For the purposes of unit tests, we want to test login
+   * from keytab and don't want to wait until the renew
+   * window (controlled by TICKET_RENEW_WINDOW).
+   * @param immediate true if we should login without waiting for ticket window
+   */
+  @VisibleForTesting
+  static void setShouldRenewImmediatelyForTests(boolean immediate) {
+    shouldRenewImmediatelyForTests = immediate;
+  }
+
   /** 
    * UgiMetrics maintains UGI activity statistics
    * and publishes them through the metrics interfaces.
@@ -178,7 +190,21 @@ public class UserGroupInformation {
       }
       // if we found the user, add our principal
       if (user != null) {
-        subject.getPrincipals().add(new User(user.getName()));
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Using user: \"" + user + "\" with name " + user.getName());
+        }
+
+        User userEntry = null;
+        try {
+          userEntry = new User(user.getName());
+        } catch (Exception e) {
+          throw (LoginException)(new LoginException(e.toString()).initCause(e));
+        }
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("User entry: \"" + userEntry.toString() + "\"" );
+        }
+
+        subject.getPrincipals().add(userEntry);
         return true;
       }
       LOG.error("Can't find user in " + subject);
@@ -592,7 +618,7 @@ public class UserGroupInformation {
   UserGroupInformation(Subject subject) {
     this.subject = subject;
     this.user = subject.getPrincipals(User.class).iterator().next();
-    this.isKeytab = !subject.getPrivateCredentials(KerberosKey.class).isEmpty();
+    this.isKeytab = !subject.getPrivateCredentials(KeyTab.class).isEmpty();
     this.isKrbTkt = !subject.getPrivateCredentials(KerberosTicket.class).isEmpty();
   }
   
@@ -747,7 +773,22 @@ public class UserGroupInformation {
     }
     return loginUser;
   }
-  
+
+  /**
+   * remove the login method that is followed by a space from the username
+   * e.g. "jack (auth:SIMPLE)" -> "jack"
+   *
+   * @param userName
+   * @return userName without login method
+   */
+  public static String trimLoginMethod(String userName) {
+    int spaceIndex = userName.indexOf(' ');
+    if (spaceIndex >= 0) {
+      userName = userName.substring(0, spaceIndex);
+    }
+    return userName;
+  }
+
   /**
    * Log in a user using the given subject
    * @parma subject the subject to use when logging in a user, or null to 
@@ -824,9 +865,6 @@ public class UserGroupInformation {
         .getPrivateCredentials(KerberosTicket.class);
     for (KerberosTicket ticket : tickets) {
       if (SecurityUtil.isOriginalTGT(ticket)) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Found tgt " + ticket);
-        }
         return ticket;
       }
     }
@@ -931,7 +969,7 @@ public class UserGroupInformation {
         metrics.loginFailure.add(Time.now() - start);
       }
       throw new IOException("Login failure for " + user + " from keytab " + 
-                            path, le);
+                            path+ ": " + le, le);
     }
     LOG.info("Login successful for user " + keytabPrincipal
         + " using keytab file " + keytabFile);
@@ -948,7 +986,8 @@ public class UserGroupInformation {
         || !isKeytab)
       return;
     KerberosTicket tgt = getTGT();
-    if (tgt != null && Time.now() < getRefreshTime(tgt)) {
+    if (tgt != null && !shouldRenewImmediatelyForTests &&
+        Time.now() < getRefreshTime(tgt)) {
       return;
     }
     reloginFromKeytab();
@@ -973,13 +1012,14 @@ public class UserGroupInformation {
       return;
     
     long now = Time.now();
-    if (!hasSufficientTimeElapsed(now)) {
+    if (!shouldRenewImmediatelyForTests && !hasSufficientTimeElapsed(now)) {
       return;
     }
 
     KerberosTicket tgt = getTGT();
     //Return if TGT is valid and is not going to expire soon.
-    if (tgt != null && now < getRefreshTime(tgt)) {
+    if (tgt != null && !shouldRenewImmediatelyForTests &&
+        now < getRefreshTime(tgt)) {
       return;
     }
     

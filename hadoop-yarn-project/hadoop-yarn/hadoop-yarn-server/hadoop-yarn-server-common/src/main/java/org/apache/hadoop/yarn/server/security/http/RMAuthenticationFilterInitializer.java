@@ -35,19 +35,19 @@ import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
+import org.apache.hadoop.security.authorize.ProxyUsers;
+import org.apache.hadoop.security.token.delegation.web.DelegationTokenAuthenticationHandler;
+import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 
 @Unstable
 public class RMAuthenticationFilterInitializer extends FilterInitializer {
 
   String configPrefix;
-  String signatureSecretFileProperty;
   String kerberosPrincipalProperty;
   String cookiePath;
 
   public RMAuthenticationFilterInitializer() {
     this.configPrefix = "hadoop.http.authentication.";
-    this.signatureSecretFileProperty =
-        AuthenticationFilter.SIGNATURE_SECRET + ".file";
     this.kerberosPrincipalProperty = KerberosAuthenticationHandler.PRINCIPAL;
     this.cookiePath = "/";
   }
@@ -58,40 +58,19 @@ public class RMAuthenticationFilterInitializer extends FilterInitializer {
     // setting the cookie path to root '/' so it is used for all resources.
     filterConfig.put(AuthenticationFilter.COOKIE_PATH, cookiePath);
 
+    // Before conf object is passed in, RM has already processed it and used RM
+    // specific configs to overwrite hadoop common ones. Hence we just need to
+    // source hadoop.proxyuser configs here.
     for (Map.Entry<String, String> entry : conf) {
-      String name = entry.getKey();
-      if (name.startsWith(configPrefix)) {
-        String value = conf.get(name);
-        name = name.substring(configPrefix.length());
+      String propName = entry.getKey();
+      if (propName.startsWith(configPrefix)) {
+        String value = conf.get(propName);
+        String name = propName.substring(configPrefix.length());
         filterConfig.put(name, value);
-      }
-    }
-
-    String signatureSecretFile = filterConfig.get(signatureSecretFileProperty);
-    if (signatureSecretFile != null) {
-      Reader reader = null;
-      try {
-        StringBuilder secret = new StringBuilder();
-        reader =
-            new InputStreamReader(new FileInputStream(signatureSecretFile),
-              "UTF-8");
-        int c = reader.read();
-        while (c > -1) {
-          secret.append((char) c);
-          c = reader.read();
-        }
-        filterConfig.put(AuthenticationFilter.SIGNATURE_SECRET,
-          secret.toString());
-      } catch (IOException ex) {
-        // if running in non-secure mode, this filter only gets added
-        // because the user has not setup his own filter so just generate
-        // a random secret. in secure mode, the user needs to setup security
-        if (UserGroupInformation.isSecurityEnabled()) {
-          throw new RuntimeException(
-            "Could not read HTTP signature secret file: " + signatureSecretFile);
-        }
-      } finally {
-        IOUtils.closeQuietly(reader);
+      } else if (propName.startsWith(ProxyUsers.CONF_HADOOP_PROXYUSER)) {
+        String value = conf.get(propName);
+        String name = propName.substring("hadoop.".length());
+        filterConfig.put(name, value);
       }
     }
 
@@ -107,6 +86,10 @@ public class RMAuthenticationFilterInitializer extends FilterInitializer {
       }
       filterConfig.put(KerberosAuthenticationHandler.PRINCIPAL, principal);
     }
+
+    filterConfig.put(DelegationTokenAuthenticationHandler.TOKEN_KIND,
+        RMDelegationTokenIdentifier.KIND_NAME.toString());
+
     return filterConfig;
   }
 

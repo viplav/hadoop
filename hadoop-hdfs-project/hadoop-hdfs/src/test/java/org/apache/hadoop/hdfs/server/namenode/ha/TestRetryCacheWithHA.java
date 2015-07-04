@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.crypto.CryptoProtocolVersion;
 import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -57,18 +58,20 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.NameNodeProxies;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
+import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
+import org.apache.hadoop.hdfs.protocol.LastBlockWithStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
-import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
@@ -161,7 +164,7 @@ public class TestRetryCacheWithHA {
     FSNamesystem fsn0 = cluster.getNamesystem(0);
     LightWeightCache<CacheEntry, CacheEntry> cacheSet = 
         (LightWeightCache<CacheEntry, CacheEntry>) fsn0.getRetryCache().getCacheSet();
-    assertEquals(23, cacheSet.size());
+    assertEquals(25, cacheSet.size());
     
     Map<CacheEntry, CacheEntry> oldEntries = 
         new HashMap<CacheEntry, CacheEntry>();
@@ -182,7 +185,7 @@ public class TestRetryCacheWithHA {
     FSNamesystem fsn1 = cluster.getNamesystem(1);
     cacheSet = (LightWeightCache<CacheEntry, CacheEntry>) fsn1
         .getRetryCache().getCacheSet();
-    assertEquals(23, cacheSet.size());
+    assertEquals(25, cacheSet.size());
     iter = cacheSet.iterator();
     while (iter.hasNext()) {
       CacheEntry entry = iter.next();
@@ -199,8 +202,8 @@ public class TestRetryCacheWithHA {
         failoverProxyProvider, RetryPolicies
         .failoverOnNetworkException(RetryPolicies.TRY_ONCE_THEN_FAIL,
             Integer.MAX_VALUE,
-            DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_BASE_DEFAULT,
-            DFSConfigKeys.DFS_CLIENT_FAILOVER_SLEEPTIME_MAX_DEFAULT));
+            HdfsClientConfigKeys.Failover.SLEEPTIME_BASE_DEFAULT,
+            HdfsClientConfigKeys.Failover.SLEEPTIME_MAX_DEFAULT));
     ClientProtocol proxy = (ClientProtocol) Proxy.newProxyInstance(
         failoverProxyProvider.getInterface().getClassLoader(),
         new Class[] { ClientProtocol.class }, dummyHandler);
@@ -212,7 +215,8 @@ public class TestRetryCacheWithHA {
   abstract class AtMostOnceOp {
     private final String name;
     final DFSClient client;
-    
+    int expectedUpdateCount = 0;
+
     AtMostOnceOp(String name, DFSClient client) {
       this.name = name;
       this.client = client;
@@ -222,6 +226,9 @@ public class TestRetryCacheWithHA {
     abstract void invoke() throws Exception;
     abstract boolean checkNamenodeBeforeReturn() throws Exception;
     abstract Object getResult();
+    int getExpectedCacheUpdateCount() {
+      return expectedUpdateCount;
+    }
   }
   
   /** createSnapshot operaiton */
@@ -395,7 +402,8 @@ public class TestRetryCacheWithHA {
       this.status = client.getNamenode().create(fileName,
           FsPermission.getFileDefault(), client.getClientName(),
           new EnumSetWritable<CreateFlag>(createFlag), false, DataNodes,
-          BlockSize, null);
+          BlockSize,
+          new CryptoProtocolVersion[] {CryptoProtocolVersion.ENCRYPTION_ZONES});
     }
 
     @Override
@@ -418,7 +426,7 @@ public class TestRetryCacheWithHA {
   /** append operation */
   class AppendOp extends AtMostOnceOp {
     private final String fileName;
-    private LocatedBlock lbk;
+    private LastBlockWithStatus lbk;
     
     AppendOp(DFSClient client, String fileName) {
       super("append", client);
@@ -435,7 +443,8 @@ public class TestRetryCacheWithHA {
 
     @Override
     void invoke() throws Exception {
-      lbk = client.getNamenode().append(fileName, client.getClientName());
+      lbk = client.getNamenode().append(fileName, client.getClientName(),
+          new EnumSetWritable<>(EnumSet.of(CreateFlag.APPEND)));
     }
     
     // check if the inode of the file is under construction
@@ -599,7 +608,7 @@ public class TestRetryCacheWithHA {
   class DeleteOp extends AtMostOnceOp {
     private final String target;
     private boolean deleted;
-    
+
     DeleteOp(DFSClient client, String target) {
       super("delete", client);
       this.target = target;
@@ -609,12 +618,14 @@ public class TestRetryCacheWithHA {
     void prepare() throws Exception {
       Path p = new Path(target);
       if (!dfs.exists(p)) {
+        expectedUpdateCount++;
         DFSTestUtil.createFile(dfs, p, BlockSize, DataNodes, 0);
       }
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       deleted = client.delete(target, true);
     }
 
@@ -650,12 +661,14 @@ public class TestRetryCacheWithHA {
     void prepare() throws Exception {
       Path p = new Path(target);
       if (!dfs.exists(p)) {
+        expectedUpdateCount++;
         DFSTestUtil.createFile(dfs, p, BlockSize, DataNodes, 0);
       }
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.createSymlink(target, link, false);
     }
 
@@ -698,7 +711,8 @@ public class TestRetryCacheWithHA {
       final Path filePath = new Path(file);
       DFSTestUtil.createFile(dfs, filePath, BlockSize, DataNodes, 0);
       // append to the file and leave the last block under construction
-      out = this.client.append(file, BlockSize, null, null);
+      out = this.client.append(file, BlockSize, EnumSet.of(CreateFlag.APPEND),
+          null, null);
       byte[] appendContent = new byte[100];
       new Random().nextBytes(appendContent);
       out.write(appendContent);
@@ -738,7 +752,7 @@ public class TestRetryCacheWithHA {
     boolean checkNamenodeBeforeReturn() throws Exception {
       INodeFile fileNode = cluster.getNamesystem(0).getFSDirectory()
           .getINode4Write(file).asFile();
-      BlockInfoUnderConstruction blkUC = 
+      BlockInfoUnderConstruction blkUC =
           (BlockInfoUnderConstruction) (fileNode.getBlocks())[1];
       int datanodeNum = blkUC.getExpectedStorageLocations().length;
       for (int i = 0; i < CHECKTIMES && datanodeNum != 2; i++) {
@@ -767,11 +781,13 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
+      expectedUpdateCount++;
       dfs.addCachePool(new CachePoolInfo(directive.getPool()));
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       result = client.addCacheDirective(directive, EnumSet.of(CacheFlag.FORCE));
     }
 
@@ -813,12 +829,15 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
+      expectedUpdateCount++;
       dfs.addCachePool(new CachePoolInfo(directive.getPool()));
+      expectedUpdateCount++;
       id = client.addCacheDirective(directive, EnumSet.of(CacheFlag.FORCE));
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.modifyCacheDirective(
           new CacheDirectiveInfo.Builder().
               setId(id).
@@ -869,12 +888,15 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
+      expectedUpdateCount++;
       dfs.addCachePool(new CachePoolInfo(directive.getPool()));
+      expectedUpdateCount++;
       id = dfs.addCacheDirective(directive, EnumSet.of(CacheFlag.FORCE));
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.removeCacheDirective(id);
     }
 
@@ -916,6 +938,7 @@ public class TestRetryCacheWithHA {
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.addCachePool(new CachePoolInfo(pool));
     }
 
@@ -948,11 +971,13 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
+      expectedUpdateCount++;
       client.addCachePool(new CachePoolInfo(pool).setLimit(10l));
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.modifyCachePool(new CachePoolInfo(pool).setLimit(99l));
     }
 
@@ -985,11 +1010,13 @@ public class TestRetryCacheWithHA {
 
     @Override
     void prepare() throws Exception {
+      expectedUpdateCount++;
       client.addCachePool(new CachePoolInfo(pool));
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.removeCachePool(pool);
     }
 
@@ -1024,12 +1051,14 @@ public class TestRetryCacheWithHA {
     void prepare() throws Exception {
       Path p = new Path(src);
       if (!dfs.exists(p)) {
+        expectedUpdateCount++;
         DFSTestUtil.createFile(dfs, p, BlockSize, DataNodes, 0);
       }
     }
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.setXAttr(src, "user.key", "value".getBytes(),
           EnumSet.of(XAttrSetFlag.CREATE));
     }
@@ -1066,7 +1095,9 @@ public class TestRetryCacheWithHA {
     void prepare() throws Exception {
       Path p = new Path(src);
       if (!dfs.exists(p)) {
+        expectedUpdateCount++;
         DFSTestUtil.createFile(dfs, p, BlockSize, DataNodes, 0);
+        expectedUpdateCount++;
         client.setXAttr(src, "user.key", "value".getBytes(),
           EnumSet.of(XAttrSetFlag.CREATE));
       }
@@ -1074,6 +1105,7 @@ public class TestRetryCacheWithHA {
 
     @Override
     void invoke() throws Exception {
+      expectedUpdateCount++;
       client.removeXAttr(src, "user.key");
     }
 
@@ -1310,6 +1342,13 @@ public class TestRetryCacheWithHA {
     assertTrue("CacheUpdated on NN0: " + updatedNN0, updatedNN0 > 0);
     // Cache updated metrics on NN0 should be >0 since NN1 applied the editlog
     assertTrue("CacheUpdated on NN1: " + updatedNN1, updatedNN1 > 0);
+    long expectedUpdateCount = op.getExpectedCacheUpdateCount();
+    if (expectedUpdateCount > 0) {
+      assertEquals("CacheUpdated on NN0: " + updatedNN0, expectedUpdateCount,
+          updatedNN0);
+      assertEquals("CacheUpdated on NN0: " + updatedNN1, expectedUpdateCount,
+          updatedNN1);
+    }
   }
 
   /**

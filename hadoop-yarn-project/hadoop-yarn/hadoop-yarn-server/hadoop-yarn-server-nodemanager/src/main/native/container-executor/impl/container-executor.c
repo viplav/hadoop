@@ -38,7 +38,13 @@
 
 static const int DEFAULT_MIN_USERID = 1000;
 
-static const char* DEFAULT_BANNED_USERS[] = {"mapred", "hdfs", "bin", 0};
+static const char* DEFAULT_BANNED_USERS[] = {"yarn", "mapred", "hdfs", "bin", 0};
+
+//location of traffic control binary
+static const char* TC_BIN = "/sbin/tc";
+static const char* TC_MODIFY_STATE_OPTS [] = { "-b" , NULL};
+static const char* TC_READ_STATE_OPTS [] = { "-b", NULL};
+static const char* TC_READ_STATS_OPTS [] = { "-s",  "-b", NULL};
 
 //struct to store the user details
 struct passwd *user_detail = NULL;
@@ -291,27 +297,20 @@ static int write_exit_code_file(const char* exit_code_file, int exit_code) {
   return 0;
 }
 
-/**
- * Wait for the container process to exit and write the exit code to
- * the exit code file.
- * Returns the exit code of the container process.
- */
-static int wait_and_write_exit_code(pid_t pid, const char* exit_code_file) {
+static int wait_and_get_exit_code(pid_t pid) {
   int child_status = -1;
   int exit_code = -1;
   int waitpid_result;
 
-  if (change_effective_user(nm_uid, nm_gid) != 0) {
-    return -1;
-  }
   do {
-    waitpid_result = waitpid(pid, &child_status, 0);
+      waitpid_result = waitpid(pid, &child_status, 0);
   } while (waitpid_result == -1 && errno == EINTR);
+
   if (waitpid_result < 0) {
-    fprintf(LOGFILE, "Error waiting for container process %d - %s\n",
-        pid, strerror(errno));
+    fprintf(LOGFILE, "error waiting for process %d - %s\n", pid, strerror(errno));
     return -1;
   }
+
   if (WIFEXITED(child_status)) {
     exit_code = WEXITSTATUS(child_status);
   } else if (WIFSIGNALED(child_status)) {
@@ -319,9 +318,26 @@ static int wait_and_write_exit_code(pid_t pid, const char* exit_code_file) {
   } else {
     fprintf(LOGFILE, "Unable to determine exit status for pid %d\n", pid);
   }
+
+  return exit_code;
+}
+
+/**
+ * Wait for the container process to exit and write the exit code to
+ * the exit code file.
+ * Returns the exit code of the container process.
+ */
+static int wait_and_write_exit_code(pid_t pid, const char* exit_code_file) {
+  int exit_code = -1;
+
+  if (change_effective_user(nm_uid, nm_gid) != 0) {
+    return -1;
+  }
+  exit_code = wait_and_get_exit_code(pid);
   if (write_exit_code_file(exit_code_file, exit_code) < 0) {
     return -1;
   }
+
   return exit_code;
 }
 
@@ -455,12 +471,7 @@ int mkdirs(const char* path, mode_t perm) {
   char * npath;
   char * p;
   if (stat(path, &sb) == 0) {
-    if (S_ISDIR (sb.st_mode)) {
-      return 0;
-    } else {
-      fprintf(LOGFILE, "Path %s is file not dir\n", path);
-      return -1;
-    }
+    return check_dir(path, sb.st_mode, perm, 1);
   }
   npath = strdup(path);
   if (npath == NULL) {
@@ -475,15 +486,7 @@ int mkdirs(const char* path, mode_t perm) {
 
   while (NULL != (p = strchr(p, '/'))) {
     *p = '\0';
-    if (stat(npath, &sb) != 0) {
-      if (mkdir(npath, perm) != 0) {
-        fprintf(LOGFILE, "Can't create directory %s in %s - %s\n", npath,
-                path, strerror(errno));
-        free(npath);
-        return -1;
-      }
-    } else if (!S_ISDIR (sb.st_mode)) {
-      fprintf(LOGFILE, "Path %s is file not dir\n", npath);
+    if (create_validate_dir(npath, perm, path, 0) == -1) {
       free(npath);
       return -1;
     }
@@ -493,9 +496,7 @@ int mkdirs(const char* path, mode_t perm) {
   }
 
   /* Create the final directory component. */
-  if (mkdir(npath, perm) != 0) {
-    fprintf(LOGFILE, "Can't create directory %s - %s\n", npath,
-            strerror(errno));
+  if (create_validate_dir(npath, perm, path, 1) == -1) {
     free(npath);
     return -1;
   }
@@ -503,6 +504,50 @@ int mkdirs(const char* path, mode_t perm) {
   return 0;
 }
 
+/*
+* Create the parent directory if they do not exist. Or check the permission if
+* the race condition happens.
+* Give 0 or 1 to represent whether this is the final component. If it is, we
+* need to check the permission.
+*/
+int create_validate_dir(char* npath, mode_t perm, char* path, int finalComponent) {
+  struct stat sb;
+  if (stat(npath, &sb) != 0) {
+    if (mkdir(npath, perm) != 0) {
+      if (errno != EEXIST || stat(npath, &sb) != 0) {
+        fprintf(LOGFILE, "Can't create directory %s - %s\n", npath,
+                strerror(errno));
+        return -1;
+      }
+      // The directory npath should exist.
+      if (check_dir(npath, sb.st_mode, perm, finalComponent) == -1) {
+        return -1;
+      }
+    }
+  } else {
+    if (check_dir(npath, sb.st_mode, perm, finalComponent) == -1) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+// check whether the given path is a directory
+// also check the access permissions whether it is the same as desired permissions
+int check_dir(char* npath, mode_t st_mode, mode_t desired, int finalComponent) {
+  if (!S_ISDIR(st_mode)) {
+    fprintf(LOGFILE, "Path %s is file not dir\n", npath);
+    return -1;
+  } else if (finalComponent == 1) {
+    int filePermInt = st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
+    int desiredInt = desired & (S_IRWXU | S_IRWXG | S_IRWXO);
+    if (filePermInt != desiredInt) {
+      fprintf(LOGFILE, "Path %s has permission %o but needs permission %o.\n", npath, filePermInt, desiredInt);
+      return -1;
+    }
+  }
+  return 0;
+}
 
 /**
  * Function to prepare the container directories.
@@ -586,8 +631,11 @@ static int create_container_directories(const char* user, const char *app_id,
  */
 static struct passwd* get_user_info(const char* user) {
   int string_size = sysconf(_SC_GETPW_R_SIZE_MAX);
-  void* buffer = malloc(string_size + sizeof(struct passwd));
   struct passwd *result = NULL;
+  if(string_size < 1024) {
+    string_size = 1024;
+  }
+  void* buffer = malloc(string_size + sizeof(struct passwd));
   if (getpwnam_r(user, buffer, buffer + sizeof(struct passwd), string_size,
 		 &result) != 0) {
     free(buffer);
@@ -655,8 +703,9 @@ struct passwd* check_user(const char *user) {
     return NULL;
   }
   char **banned_users = get_values(BANNED_USERS_KEY);
-  char **banned_user = (banned_users == NULL) ? 
+  banned_users = banned_users == NULL ?
     (char**) DEFAULT_BANNED_USERS : banned_users;
+  char **banned_user = banned_users;
   for(; *banned_user; ++banned_user) {
     if (strcmp(*banned_user, user) == 0) {
       free(user_info);
@@ -1325,21 +1374,37 @@ int delete_as_user(const char *user,
                    const char *subdir,
                    char* const* baseDirs) {
   int ret = 0;
-
+  int subDirEmptyStr = (subdir == NULL || subdir[0] == 0);
+  int needs_tt_user = subDirEmptyStr;
   char** ptr;
 
   // TODO: No switching user? !!!!
   if (baseDirs == NULL || *baseDirs == NULL) {
-    return delete_path(subdir, strlen(subdir) == 0);
+    return delete_path(subdir, needs_tt_user);
   }
   // do the delete
   for(ptr = (char**)baseDirs; *ptr != NULL; ++ptr) {
-    char* full_path = concatenate("%s/%s", "user subdir", 2,
-                              *ptr, subdir);
+    char* full_path = NULL;
+    struct stat sb;
+    if (stat(*ptr, &sb) != 0) {
+      fprintf(LOGFILE, "Could not stat %s\n", *ptr);
+      return -1;
+    }
+    if (!S_ISDIR(sb.st_mode)) {
+      if (!subDirEmptyStr) {
+        fprintf(LOGFILE, "baseDir \"%s\" is a file and cannot contain subdir \"%s\".\n", *ptr, subdir);
+        return -1;
+      }
+      full_path = strdup(*ptr);
+      needs_tt_user = 0;
+    } else {
+      full_path = concatenate("%s/%s", "user subdir", 2, *ptr, subdir);
+    }
+
     if (full_path == NULL) {
       return -1;
     }
-    int this_ret = delete_path(full_path, strlen(subdir) == 0);
+    int this_ret = delete_path(full_path, needs_tt_user);
     free(full_path);
     // delete as much as we can, but remember the error
     if (this_ret != 0) {
@@ -1363,7 +1428,7 @@ void chown_dir_contents(const char *dir_path, uid_t uid, gid_t gid) {
      
   dp = opendir(dir_path);
   if (dp != NULL) {
-    while (ep = readdir(dp)) {
+    while ((ep = readdir(dp)) != NULL) {
       stpncpy(buf, ep->d_name, strlen(ep->d_name));
       buf[strlen(ep->d_name)] = '\0';
       change_owner(path_tmp, uid, gid);
@@ -1424,3 +1489,63 @@ int mount_cgroup(const char *pair, const char *hierarchy) {
 #endif
 }
 
+static int run_traffic_control(const char *opts[], char *command_file) {
+  const int max_tc_args = 16;
+  char *args[max_tc_args];
+  int i = 0, j = 0;
+
+  args[i++] = TC_BIN;
+  while (opts[j] != NULL && i < max_tc_args - 1) {
+    args[i] = opts[j];
+    ++i, ++j;
+  }
+  //too many args to tc
+  if (i == max_tc_args - 1) {
+    fprintf(LOGFILE, "too many args to tc");
+    return TRAFFIC_CONTROL_EXECUTION_FAILED;
+  }
+  args[i++] = command_file;
+  args[i] = 0;
+
+  pid_t child_pid = fork();
+  if (child_pid != 0) {
+    int exit_code = wait_and_get_exit_code(child_pid);
+    if (exit_code != 0) {
+      fprintf(LOGFILE, "failed to execute tc command!\n");
+      return TRAFFIC_CONTROL_EXECUTION_FAILED;
+    }
+    unlink(command_file);
+    return 0;
+  } else {
+    execv(TC_BIN, args);
+    //if we reach here, exec failed
+    fprintf(LOGFILE, "failed to execute tc command! error: %s\n", strerror(errno));
+    return TRAFFIC_CONTROL_EXECUTION_FAILED;
+  }
+}
+
+/**
+ * Run a batch of tc commands that modify interface configuration. command_file
+ * is deleted after being used.
+ */
+int traffic_control_modify_state(char *command_file) {
+  return run_traffic_control(TC_MODIFY_STATE_OPTS, command_file);
+}
+
+/**
+ * Run a batch of tc commands that read interface configuration. Output is
+ * written to standard output and it is expected to be read and parsed by the
+ * calling process. command_file is deleted after being used.
+ */
+int traffic_control_read_state(char *command_file) {
+  return run_traffic_control(TC_READ_STATE_OPTS, command_file);
+}
+
+/**
+ * Run a batch of tc commands that read interface stats. Output is
+ * written to standard output and it is expected to be read and parsed by the
+ * calling process. command_file is deleted after being used.
+ */
+int traffic_control_read_stats(char *command_file) {
+  return run_traffic_control(TC_READ_STATS_OPTS, command_file);
+}

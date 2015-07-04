@@ -19,7 +19,11 @@ package org.apache.hadoop.yarn.client.cli;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -31,6 +35,7 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.MissingArgumentException;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.time.DateFormatUtils;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
@@ -63,6 +68,7 @@ public class NodeCLI extends YarnCLI {
   public int run(String[] args) throws Exception {
 
     Options opts = new Options();
+    opts.addOption(HELP_CMD, false, "Displays help for all commands.");
     opts.addOption(STATUS_CMD, true, "Prints the status report of the node.");
     opts.addOption(LIST_CMD, false, "List all running nodes. " +
         "Supports optional use of -states to filter nodes " +
@@ -105,7 +111,8 @@ public class NodeCLI extends YarnCLI {
         if (types != null) {
           for (String type : types) {
             if (!type.trim().isEmpty()) {
-              nodeStates.add(NodeState.valueOf(type.trim().toUpperCase()));
+              nodeStates.add(NodeState.valueOf(
+                  org.apache.hadoop.util.StringUtils.toUpperCase(type.trim())));
             }
           }
         }
@@ -113,6 +120,9 @@ public class NodeCLI extends YarnCLI {
         nodeStates.add(NodeState.RUNNING);
       }
       listClusterNodes(nodeStates);
+    } else if (cliParser.hasOption(HELP_CMD)) {
+      printUsage(opts);
+      return 0;
     } else {
       syserr.println("Invalid Command Usage : ");
       printUsage(opts);
@@ -138,7 +148,8 @@ public class NodeCLI extends YarnCLI {
    */
   private void listClusterNodes(Set<NodeState> nodeStates) 
             throws YarnException, IOException {
-    PrintWriter writer = new PrintWriter(sysout);
+    PrintWriter writer = new PrintWriter(
+        new OutputStreamWriter(sysout, Charset.forName("UTF-8")));
     List<NodeReport> nodesReport = client.getNodeReports(
                                        nodeStates.toArray(new NodeState[0]));
     writer.println("Total Nodes:" + nodesReport.size());
@@ -164,7 +175,8 @@ public class NodeCLI extends YarnCLI {
     List<NodeReport> nodesReport = client.getNodeReports();
     // Use PrintWriter.println, which uses correct platform line ending.
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    PrintWriter nodeReportStr = new PrintWriter(baos);
+    PrintWriter nodeReportStr = new PrintWriter(
+        new OutputStreamWriter(baos, Charset.forName("UTF-8")));
     NodeReport nodeReport = null;
     for (NodeReport report : nodesReport) {
       if (!report.getNodeId().equals(nodeId)) {
@@ -199,6 +211,13 @@ public class NodeCLI extends YarnCLI {
           : (nodeReport.getUsed().getVirtualCores() + " vcores"));
       nodeReportStr.print("\tCPU-Capacity : ");
       nodeReportStr.println(nodeReport.getCapability().getVirtualCores() + " vcores");
+      nodeReportStr.print("\tNode-Labels : ");
+      
+      // Create a List for node labels since we need it get sorted
+      List<String> nodeLabelsList =
+          new ArrayList<String>(report.getNodeLabels());
+      Collections.sort(nodeLabelsList);
+      nodeReportStr.println(StringUtils.join(nodeLabelsList.iterator(), ','));
     }
 
     if (nodeReport == null) {

@@ -26,6 +26,7 @@ import java.util.Map;
 
 import javax.management.ObjectName;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -92,8 +93,9 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
     
     return journal;
   }
-  
-  Journal getOrCreateJournal(String jid) throws IOException {
+
+  @VisibleForTesting
+  public Journal getOrCreateJournal(String jid) throws IOException {
     return getOrCreateJournal(jid, StartupOption.REGULAR);
   }
 
@@ -231,6 +233,7 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
     Preconditions.checkArgument(jid != null &&
         !jid.isEmpty(),
         "bad journal identifier: %s", jid);
+    assert jid != null;
     return new File(new File(dir), jid);
   }
 

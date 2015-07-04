@@ -34,10 +34,7 @@ import org.apache.hadoop.util.NativeCodeLoader;
  */
 public class ZlibDecompressor implements Decompressor {
   private static final int DEFAULT_DIRECT_BUFFER_SIZE = 64*1024;
-  
-  // HACK - Use this as a global lock in the JNI layer
-  private static Class clazz = ZlibDecompressor.class;
-  
+
   private long stream;
   private CompressionHeader header;
   private int directBufferSize;
@@ -120,7 +117,7 @@ public class ZlibDecompressor implements Decompressor {
   }
 
   @Override
-  public synchronized void setInput(byte[] b, int off, int len) {
+  public void setInput(byte[] b, int off, int len) {
     if (b == null) {
       throw new NullPointerException();
     }
@@ -139,7 +136,7 @@ public class ZlibDecompressor implements Decompressor {
     uncompressedDirectBuf.position(directBufferSize);
   }
   
-  synchronized void setInputFromSavedData() {
+  void setInputFromSavedData() {
     compressedDirectBufOff = 0;
     compressedDirectBufLen = userBufLen;
     if (compressedDirectBufLen > directBufferSize) {
@@ -157,7 +154,7 @@ public class ZlibDecompressor implements Decompressor {
   }
 
   @Override
-  public synchronized void setDictionary(byte[] b, int off, int len) {
+  public void setDictionary(byte[] b, int off, int len) {
     if (stream == 0 || b == null) {
       throw new NullPointerException();
     }
@@ -169,7 +166,7 @@ public class ZlibDecompressor implements Decompressor {
   }
 
   @Override
-  public synchronized boolean needsInput() {
+  public boolean needsInput() {
     // Consume remaining compressed data?
     if (uncompressedDirectBuf.remaining() > 0) {
       return false;
@@ -189,19 +186,19 @@ public class ZlibDecompressor implements Decompressor {
   }
 
   @Override
-  public synchronized boolean needsDictionary() {
+  public boolean needsDictionary() {
     return needDict;
   }
 
   @Override
-  public synchronized boolean finished() {
+  public boolean finished() {
     // Check if 'zlib' says it's 'finished' and
     // all compressed data has been consumed
     return (finished && uncompressedDirectBuf.remaining() == 0);
   }
 
   @Override
-  public synchronized int decompress(byte[] b, int off, int len) 
+  public int decompress(byte[] b, int off, int len) 
     throws IOException {
     if (b == null) {
       throw new NullPointerException();
@@ -240,7 +237,7 @@ public class ZlibDecompressor implements Decompressor {
    *
    * @return the total (non-negative) number of uncompressed bytes output so far
    */
-  public synchronized long getBytesWritten() {
+  public long getBytesWritten() {
     checkStream();
     return getBytesWritten(stream);
   }
@@ -250,7 +247,7 @@ public class ZlibDecompressor implements Decompressor {
    *
    * @return the total (non-negative) number of compressed bytes input so far
    */
-  public synchronized long getBytesRead() {
+  public long getBytesRead() {
     checkStream();
     return getBytesRead(stream);
   }
@@ -263,7 +260,7 @@ public class ZlibDecompressor implements Decompressor {
    * @return the total (non-negative) number of unprocessed bytes in input
    */
   @Override
-  public synchronized int getRemaining() {
+  public int getRemaining() {
     checkStream();
     return userBufLen + getRemaining(stream);  // userBuf + compressedDirectBuf
   }
@@ -272,7 +269,7 @@ public class ZlibDecompressor implements Decompressor {
    * Resets everything including the input buffers (user and direct).</p>
    */
   @Override
-  public synchronized void reset() {
+  public void reset() {
     checkStream();
     reset(stream);
     finished = false;
@@ -284,7 +281,7 @@ public class ZlibDecompressor implements Decompressor {
   }
 
   @Override
-  public synchronized void end() {
+  public void end() {
     if (stream != 0) {
       end(stream);
       stream = 0;
@@ -372,7 +369,7 @@ public class ZlibDecompressor implements Decompressor {
     private boolean endOfInput;
 
     @Override
-    public synchronized void decompress(ByteBuffer src, ByteBuffer dst)
+    public void decompress(ByteBuffer src, ByteBuffer dst)
         throws IOException {
       assert dst.isDirect() : "dst.isDirect()";
       assert src.isDirect() : "src.isDirect()";
@@ -382,13 +379,13 @@ public class ZlibDecompressor implements Decompressor {
     }
 
     @Override
-    public synchronized void setDictionary(byte[] b, int off, int len) {
+    public void setDictionary(byte[] b, int off, int len) {
       throw new UnsupportedOperationException(
           "byte[] arrays are not supported for DirectDecompressor");
     }
 
     @Override
-    public synchronized int decompress(byte[] b, int off, int len) {
+    public int decompress(byte[] b, int off, int len) {
       throw new UnsupportedOperationException(
           "byte[] arrays are not supported for DirectDecompressor");
     }

@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.nodemanager.webapp;
 
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 
@@ -28,6 +29,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,11 +39,17 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.NodeHealthScriptRunner;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.impl.pb.ContainerIdPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationAttemptIdPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.ApplicationIdPBImpl;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerImpl;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.exceptions.YarnException;
@@ -68,6 +77,12 @@ import com.google.inject.Module;
 
 public class TestContainerLogsPage {
 
+  private NodeHealthCheckerService createNodeHealthCheckerService(Configuration conf) {
+    NodeHealthScriptRunner scriptRunner = NodeManager.getNodeHealthScriptRunner(conf);
+    LocalDirsHandlerService dirsHandler = new LocalDirsHandlerService();
+    return new NodeHealthCheckerService(scriptRunner, dirsHandler);
+  }
+
   @Test(timeout=30000)
   public void testContainerLogDirs() throws IOException, YarnException {
     File absLogDir = new File("target",
@@ -75,7 +90,7 @@ public class TestContainerLogsPage {
     String logdirwithFile = absLogDir.toURI().toString();
     Configuration conf = new Configuration();
     conf.set(YarnConfiguration.NM_LOG_DIRS, logdirwithFile);
-    NodeHealthCheckerService healthChecker = new NodeHealthCheckerService();
+    NodeHealthCheckerService healthChecker = createNodeHealthCheckerService(conf);
     healthChecker.init(conf);
     LocalDirsHandlerService dirsHandler = healthChecker.getDiskHandler();
     NMContext nmContext = new NodeManager.NMContext(null, null, dirsHandler,
@@ -109,8 +124,26 @@ public class TestContainerLogsPage {
     Assert.assertNull(nmContext.getContainers().get(container1));
     files = ContainerLogsUtils.getContainerLogDirs(container1, user, nmContext);
     Assert.assertTrue(!(files.get(0).toString().contains("file:")));
+
+    // Create a new context to check if correct container log dirs are fetched
+    // on full disk.
+    LocalDirsHandlerService dirsHandlerForFullDisk = spy(dirsHandler);
+    // good log dirs are empty and nm log dir is in the full log dir list.
+    when(dirsHandlerForFullDisk.getLogDirs()).
+        thenReturn(new ArrayList<String>());
+    when(dirsHandlerForFullDisk.getLogDirsForRead()).
+        thenReturn(Arrays.asList(new String[] {absLogDir.getAbsolutePath()}));
+    nmContext = new NodeManager.NMContext(null, null, dirsHandlerForFullDisk,
+        new ApplicationACLsManager(conf), new NMNullStateStoreService());
+    nmContext.getApplications().put(appId, app);
+    container.setState(ContainerState.RUNNING);
+    nmContext.getContainers().put(container1, container);
+    List<File> dirs =
+        ContainerLogsUtils.getContainerLogDirs(container1, user, nmContext);
+    File containerLogDir = new File(absLogDir, appId + "/" + container1);
+    Assert.assertTrue(dirs.contains(containerLogDir));
   }
-  
+
   @Test(timeout = 10000)
   public void testContainerLogPageAccess() throws IOException {
     // SecureIOUtils require Native IO to be enabled. This test will run
@@ -131,7 +164,7 @@ public class TestContainerLogsPage {
         "kerberos");
       UserGroupInformation.setConfiguration(conf);
 
-      NodeHealthCheckerService healthChecker = new NodeHealthCheckerService();
+      NodeHealthCheckerService healthChecker = createNodeHealthCheckerService(conf);
       healthChecker.init(conf);
       LocalDirsHandlerService dirsHandler = healthChecker.getDiskHandler();
       // Add an application and the corresponding containers
@@ -210,4 +243,80 @@ public class TestContainerLogsPage {
       }
     }
   }
+  
+  @Test
+  public void testLogDirWithDriveLetter() throws Exception {
+    //To verify that logs paths which include drive letters (Windows)
+    //do not lose their drive letter specification
+    LocalDirsHandlerService localDirs = mock(LocalDirsHandlerService.class);
+    List<String> logDirs = new ArrayList<String>();
+    logDirs.add("F:/nmlogs");
+    when(localDirs.getLogDirsForRead()).thenReturn(logDirs);
+    
+    ApplicationIdPBImpl appId = mock(ApplicationIdPBImpl.class);
+    when(appId.toString()).thenReturn("app_id_1");
+    
+    ApplicationAttemptIdPBImpl appAttemptId =
+               mock(ApplicationAttemptIdPBImpl.class);
+    when(appAttemptId.getApplicationId()).thenReturn(appId);
+    
+    ContainerId containerId = mock(ContainerIdPBImpl.class);
+    when(containerId.getApplicationAttemptId()).thenReturn(appAttemptId);
+    
+    List<File> logDirFiles = ContainerLogsUtils.getContainerLogDirs(
+      containerId, localDirs);
+    
+    Assert.assertTrue("logDir lost drive letter " +
+      logDirFiles.get(0),
+      logDirFiles.get(0).toString().indexOf("F:" + File.separator +
+        "nmlogs") > -1);
+  }
+  
+  @Test
+  public void testLogFileWithDriveLetter() throws Exception {
+    
+    ContainerImpl container = mock(ContainerImpl.class);
+    
+    ApplicationIdPBImpl appId = mock(ApplicationIdPBImpl.class);
+    when(appId.toString()).thenReturn("appId");
+    
+    Application app = mock(Application.class);
+    when(app.getAppId()).thenReturn(appId);
+    
+    ApplicationAttemptIdPBImpl appAttemptId =
+               mock(ApplicationAttemptIdPBImpl.class);
+    when(appAttemptId.getApplicationId()).thenReturn(appId); 
+    
+    ConcurrentMap<ApplicationId, Application> applications = 
+      new ConcurrentHashMap<ApplicationId, Application>();
+    applications.put(appId, app);
+    
+    ContainerId containerId = mock(ContainerIdPBImpl.class);
+    when(containerId.toString()).thenReturn("containerId");
+    when(containerId.getApplicationAttemptId()).thenReturn(appAttemptId);
+    
+    ConcurrentMap<ContainerId, Container> containers = 
+      new ConcurrentHashMap<ContainerId, Container>();
+    
+    containers.put(containerId, container);
+    
+    LocalDirsHandlerService localDirs = mock(LocalDirsHandlerService.class);
+    when(localDirs.getLogPathToRead("appId" + Path.SEPARATOR + "containerId" +
+      Path.SEPARATOR + "fileName"))
+      .thenReturn(new Path("F:/nmlogs/appId/containerId/fileName"));
+    
+    NMContext context = mock(NMContext.class);
+    when(context.getLocalDirsHandler()).thenReturn(localDirs);
+    when(context.getApplications()).thenReturn(applications);
+    when(context.getContainers()).thenReturn(containers);
+    
+    File logFile = ContainerLogsUtils.getContainerLogFile(containerId,
+      "fileName", null, context);
+      
+    Assert.assertTrue("logFile lost drive letter " +
+      logFile,
+      logFile.toString().indexOf("F:" + File.separator + "nmlogs") > -1);
+    
+  }
+  
 }

@@ -51,7 +51,12 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.DecommissionManager;
+import org.apache.hadoop.hdfs.server.datanode.DataNode;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
+import org.apache.log4j.Level;
+import org.apache.log4j.Logger;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -88,7 +93,8 @@ public class TestDecommissioningStatus {
     conf.set(DFSConfigKeys.DFS_HOSTS_EXCLUDE, excludeFile.toUri().getPath());
     Path includeFile = new Path(dir, "include");
     conf.set(DFSConfigKeys.DFS_HOSTS, includeFile.toUri().getPath());
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 2000);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 
+        1000);
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_PENDING_TIMEOUT_SEC_KEY,
         4);
@@ -102,6 +108,9 @@ public class TestDecommissioningStatus {
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes).build();
     cluster.waitActive();
     fileSys = cluster.getFileSystem();
+    cluster.getNamesystem().getBlockManager().getDatanodeManager()
+        .setHeartbeatExpireInterval(3000);
+    Logger.getLogger(DecommissionManager.class).setLevel(Level.DEBUG);
   }
 
   @AfterClass
@@ -184,13 +193,16 @@ public class TestDecommissioningStatus {
   private void checkDecommissionStatus(DatanodeDescriptor decommNode,
       int expectedUnderRep, int expectedDecommissionOnly,
       int expectedUnderRepInOpenFiles) {
-    assertEquals(decommNode.decommissioningStatus.getUnderReplicatedBlocks(),
-        expectedUnderRep);
+    assertEquals("Unexpected num under-replicated blocks",
+        expectedUnderRep,
+        decommNode.decommissioningStatus.getUnderReplicatedBlocks());
+    assertEquals("Unexpected number of decom-only replicas",
+        expectedDecommissionOnly,
+        decommNode.decommissioningStatus.getDecommissionOnlyReplicas());
     assertEquals(
-        decommNode.decommissioningStatus.getDecommissionOnlyReplicas(),
-        expectedDecommissionOnly);
-    assertEquals(decommNode.decommissioningStatus
-        .getUnderReplicatedInOpenFiles(), expectedUnderRepInOpenFiles);
+        "Unexpected number of replicas in under-replicated open files",
+        expectedUnderRepInOpenFiles,
+        decommNode.decommissioningStatus.getUnderReplicatedInOpenFiles());
   }
 
   private void checkDFSAdminDecommissionStatus(
@@ -237,12 +249,12 @@ public class TestDecommissioningStatus {
       System.setOut(oldOut);
     }
   }
+
   /**
    * Tests Decommissioning Status in DFS.
    */
-
   @Test
-  public void testDecommissionStatus() throws IOException, InterruptedException {
+  public void testDecommissionStatus() throws Exception {
     InetSocketAddress addr = new InetSocketAddress("localhost", cluster
         .getNameNodePort());
     DFSClient client = new DFSClient(addr, conf);
@@ -251,7 +263,7 @@ public class TestDecommissioningStatus {
     DistributedFileSystem fileSys = cluster.getFileSystem();
     DFSAdmin admin = new DFSAdmin(cluster.getConfiguration(0));
 
-    short replicas = 2;
+    short replicas = numDatanodes;
     //
     // Decommission one node. Verify the decommission status
     // 
@@ -261,7 +273,9 @@ public class TestDecommissioningStatus {
 
     Path file2 = new Path("decommission1.dat");
     FSDataOutputStream st1 = writeIncompleteFile(fileSys, file2, replicas);
-    Thread.sleep(5000);
+    for (DataNode d: cluster.getDataNodes()) {
+      DataNodeTestUtils.triggerBlockReport(d);
+    }
 
     FSNamesystem fsn = cluster.getNamesystem();
     final DatanodeManager dm = fsn.getBlockManager().getDatanodeManager();
@@ -269,19 +283,22 @@ public class TestDecommissioningStatus {
       String downnode = decommissionNode(fsn, client, localFileSys, iteration);
       dm.refreshNodes(conf);
       decommissionedNodes.add(downnode);
-      Thread.sleep(5000);
+      BlockManagerTestUtil.recheckDecommissionState(dm);
       final List<DatanodeDescriptor> decommissioningNodes = dm.getDecommissioningNodes();
       if (iteration == 0) {
         assertEquals(decommissioningNodes.size(), 1);
         DatanodeDescriptor decommNode = decommissioningNodes.get(0);
-        checkDecommissionStatus(decommNode, 4, 0, 2);
+        checkDecommissionStatus(decommNode, 3, 0, 1);
         checkDFSAdminDecommissionStatus(decommissioningNodes.subList(0, 1),
             fileSys, admin);
       } else {
         assertEquals(decommissioningNodes.size(), 2);
         DatanodeDescriptor decommNode1 = decommissioningNodes.get(0);
         DatanodeDescriptor decommNode2 = decommissioningNodes.get(1);
-        checkDecommissionStatus(decommNode1, 4, 4, 2);
+        // This one is still 3,3,1 since it passed over the UC block 
+        // earlier, before node 2 was decommed
+        checkDecommissionStatus(decommNode1, 3, 3, 1);
+        // This one is 4,4,2 since it has the full state
         checkDecommissionStatus(decommNode2, 4, 4, 2);
         checkDFSAdminDecommissionStatus(decommissioningNodes.subList(0, 2),
             fileSys, admin);
@@ -303,8 +320,7 @@ public class TestDecommissioningStatus {
    * the replication process after it rejoins the cluster.
    */
   @Test(timeout=120000)
-  public void testDecommissionStatusAfterDNRestart()
-      throws IOException, InterruptedException {
+  public void testDecommissionStatusAfterDNRestart() throws Exception {
     DistributedFileSystem fileSys =
         (DistributedFileSystem)cluster.getFileSystem();
 
@@ -343,11 +359,23 @@ public class TestDecommissioningStatus {
     BlockManagerTestUtil.checkHeartbeat(fsn.getBlockManager());
 
     // Force DatanodeManager to check decommission state.
-    BlockManagerTestUtil.checkDecommissionState(dm, dead.get(0));
+    BlockManagerTestUtil.recheckDecommissionState(dm);
 
     // Verify that the DN remains in DECOMMISSION_INPROGRESS state.
-    assertTrue("the node is in decommissioned state ",
-        !dead.get(0).isDecommissioned());
+    assertTrue("the node should be DECOMMISSION_IN_PROGRESSS",
+        dead.get(0).isDecommissionInProgress());
+
+    // Check DatanodeManager#getDecommissionNodes, make sure it returns
+    // the node as decommissioning, even if it's dead
+    List<DatanodeDescriptor> decomlist = dm.getDecommissioningNodes();
+    assertTrue("The node should be be decommissioning", decomlist.size() == 1);
+    
+    // Delete the under-replicated file, which should let the 
+    // DECOMMISSION_IN_PROGRESS node become DECOMMISSIONED
+    cleanupFile(fileSys, f);
+    BlockManagerTestUtil.recheckDecommissionState(dm);
+    assertTrue("the node should be decommissioned",
+        dead.get(0).isDecommissioned());
 
     // Add the node back
     cluster.restartDataNode(dataNodeProperties, true);
@@ -358,6 +386,37 @@ public class TestDecommissioningStatus {
     // make them available again.
     writeConfigFile(localFileSys, excludeFile, null);
     dm.refreshNodes(conf);
-    cleanupFile(fileSys, f);
+  }
+
+  /**
+   * Verify the support for decommissioning a datanode that is already dead.
+   * Under this scenario the datanode should immediately be marked as
+   * DECOMMISSIONED
+   */
+  @Test(timeout=120000)
+  public void testDecommissionDeadDN() throws Exception {
+    Logger log = Logger.getLogger(DecommissionManager.class);
+    log.setLevel(Level.DEBUG);
+    DatanodeID dnID = cluster.getDataNodes().get(0).getDatanodeId();
+    String dnName = dnID.getXferAddr();
+    DataNodeProperties stoppedDN = cluster.stopDataNode(0);
+    DFSTestUtil.waitForDatanodeState(cluster, dnID.getDatanodeUuid(),
+        false, 30000);
+    FSNamesystem fsn = cluster.getNamesystem();
+    final DatanodeManager dm = fsn.getBlockManager().getDatanodeManager();
+    DatanodeDescriptor dnDescriptor = dm.getDatanode(dnID);
+    decommissionNode(fsn, localFileSys, dnName);
+    dm.refreshNodes(conf);
+    BlockManagerTestUtil.recheckDecommissionState(dm);
+    assertTrue(dnDescriptor.isDecommissioned());
+
+    // Add the node back
+    cluster.restartDataNode(stoppedDN, true);
+    cluster.waitActive();
+
+    // Call refreshNodes on FSNamesystem with empty exclude file to remove the
+    // datanode from decommissioning list and make it available again.
+    writeConfigFile(localFileSys, excludeFile, null);
+    dm.refreshNodes(conf);
   }
 }

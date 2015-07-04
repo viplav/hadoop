@@ -22,11 +22,13 @@ import static org.apache.hadoop.yarn.util.StringHelper.join;
 
 import java.util.Collection;
 
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.FairSchedulerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.FairSchedulerLeafQueueInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.FairSchedulerQueueInfo;
+import org.apache.hadoop.yarn.server.webapp.WebPageUtils;
 import org.apache.hadoop.yarn.webapp.ResponseInfo;
 import org.apache.hadoop.yarn.webapp.SubView;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
@@ -234,30 +236,20 @@ public class FairSchedulerPage extends RmView {
     return QueuesBlock.class;
   }
 
+  @Override
+  protected String initAppsTable() {
+    return WebPageUtils.appsTableInit(true, false);
+  }
+
   static String percent(float f) {
-    return String.format("%.1f%%", f * 100);
+    return StringUtils.formatPercent(f, 1);
   }
 
   static String width(float f) {
-    return String.format("width:%.1f%%", f * 100);
+    return StringUtils.format("width:%.1f%%", f * 100);
   }
 
   static String left(float f) {
-    return String.format("left:%.1f%%", f * 100);
-  }
-  
-  @Override
-  protected String getAppsTableColumnDefs() {
-    StringBuilder sb = new StringBuilder();
-    return sb
-      .append("[\n")
-      .append("{'sType':'numeric', 'aTargets': [0]")
-      .append(", 'mRender': parseHadoopID }")
-
-      .append("\n, {'sType':'numeric', 'aTargets': [6, 7]")
-      .append(", 'mRender': renderHadoopDate }")
-
-      .append("\n, {'sType':'numeric', bSearchable:false, 'aTargets': [9]")
-      .append(", 'mRender': parseHadoopProgress }]").toString();
+    return StringUtils.format("left:%.1f%%", f * 100);
   }
 }

@@ -34,6 +34,7 @@ import org.junit.Test;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
@@ -125,6 +126,7 @@ public class TestHarFileSystem {
     public Iterator<LocatedFileStatus> listLocatedStatus(Path f);
     public Iterator<LocatedFileStatus> listLocatedStatus(Path f,
         PathFilter filter);
+    public Iterator<FileStatus> listStatusIterator(Path f);
     public void copyFromLocalFile(Path src, Path dst);
     public void moveFromLocalFile(Path[] srcs, Path dst);
     public void moveFromLocalFile(Path src, Path dst);
@@ -204,6 +206,12 @@ public class TestHarFileSystem {
     public AclStatus getAclStatus(Path path) throws IOException;
 
     public void access(Path path, FsAction mode) throws IOException;
+
+    public void setStoragePolicy(Path src, String policyName)
+        throws IOException;
+
+    public Collection<? extends BlockStoragePolicySpi> getAllStoragePolicies()
+        throws IOException;
   }
 
   @Test

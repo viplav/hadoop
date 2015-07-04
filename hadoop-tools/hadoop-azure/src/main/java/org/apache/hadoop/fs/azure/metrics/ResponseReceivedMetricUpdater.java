@@ -24,17 +24,16 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 
-import com.microsoft.windowsazure.storage.Constants.HeaderConstants;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.RequestResult;
-import com.microsoft.windowsazure.storage.ResponseReceivedEvent;
-import com.microsoft.windowsazure.storage.StorageEvent;
+import com.microsoft.azure.storage.Constants.HeaderConstants;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.RequestResult;
+import com.microsoft.azure.storage.ResponseReceivedEvent;
+import com.microsoft.azure.storage.StorageEvent;
 
 
 /**
  * An event listener to the ResponseReceived event from Azure Storage that will
- * update metrics appropriately.
- *
+ * update metrics appropriately when it gets that event.
  */
 @InterfaceAudience.Private
 public final class ResponseReceivedMetricUpdater extends StorageEvent<ResponseReceivedEvent> {
@@ -43,7 +42,7 @@ public final class ResponseReceivedMetricUpdater extends StorageEvent<ResponseRe
 
   private final AzureFileSystemInstrumentation instrumentation;
   private final BandwidthGaugeUpdater blockUploadGaugeUpdater;
-  
+
   private ResponseReceivedMetricUpdater(OperationContext operationContext,
       AzureFileSystemInstrumentation instrumentation,
       BandwidthGaugeUpdater blockUploadGaugeUpdater) {
@@ -142,6 +141,6 @@ public final class ResponseReceivedMetricUpdater extends StorageEvent<ResponseRe
         instrumentation.rawBytesDownloaded(length);
         instrumentation.blockDownloaded(requestLatency);
       }
-    } 
+    }
   }
 }

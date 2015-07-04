@@ -45,12 +45,14 @@ import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.ReadOpChecksumIn
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.protocolPB.PBHelper;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
-import org.apache.hadoop.hdfs.security.token.block.InvalidBlockTokenException;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.shortcircuit.ClientMmap;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.htrace.Sampler;
+import org.apache.htrace.Trace;
+import org.apache.htrace.TraceScope;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -88,6 +90,7 @@ public class RemoteBlockReader2  implements BlockReader {
   final private Peer peer;
   final private DatanodeID datanodeID;
   final private PeerCache peerCache;
+  final private long blockId;
   private final ReadableByteChannel in;
   private DataChecksum checksum;
   
@@ -119,12 +122,7 @@ public class RemoteBlockReader2  implements BlockReader {
   private final boolean verifyChecksum;
 
   private boolean sentStatusCode = false;
-  
-  byte[] skipBuf = null;
-  ByteBuffer checksumBytes = null;
-  /** Amount of unread data in the current received packet */
-  int dataLeft = 0;
-  
+
   @VisibleForTesting
   public Peer getPeer() {
     return peer;
@@ -143,7 +141,13 @@ public class RemoteBlockReader2  implements BlockReader {
     }
 
     if (curDataSlice == null || curDataSlice.remaining() == 0 && bytesNeededToFinish > 0) {
-      readNextPacket();
+      TraceScope scope = Trace.startSpan(
+          "RemoteBlockReader2#readNextPacket(" + blockId + ")", Sampler.NEVER);
+      try {
+        readNextPacket();
+      } finally {
+        scope.close();
+      }
     }
 
     if (LOG.isTraceEnabled()) {
@@ -163,9 +167,15 @@ public class RemoteBlockReader2  implements BlockReader {
 
 
   @Override
-  public int read(ByteBuffer buf) throws IOException {
+  public synchronized int read(ByteBuffer buf) throws IOException {
     if (curDataSlice == null || curDataSlice.remaining() == 0 && bytesNeededToFinish > 0) {
-      readNextPacket();
+      TraceScope scope = Trace.startSpan(
+          "RemoteBlockReader2#readNextPacket(" + blockId + ")", Sampler.NEVER);
+      try {
+        readNextPacket();
+      } finally {
+        scope.close();
+      }
     }
     if (curDataSlice.remaining() == 0) {
       // we're at EOF now
@@ -242,21 +252,23 @@ public class RemoteBlockReader2  implements BlockReader {
   @Override
   public synchronized long skip(long n) throws IOException {
     /* How can we make sure we don't throw a ChecksumException, at least
-     * in majority of the cases?. This one throws. */  
-    if ( skipBuf == null ) {
-      skipBuf = new byte[bytesPerChecksum]; 
-    }
-
-    long nSkipped = 0;
-    while ( nSkipped < n ) {
-      int toSkip = (int)Math.min(n-nSkipped, skipBuf.length);
-      int ret = read(skipBuf, 0, toSkip);
-      if ( ret <= 0 ) {
-        return nSkipped;
+     * in majority of the cases?. This one throws. */
+    long skipped = 0;
+    while (skipped < n) {
+      long needToSkip = n - skipped;
+      if (curDataSlice == null || curDataSlice.remaining() == 0 && bytesNeededToFinish > 0) {
+        readNextPacket();
       }
-      nSkipped += ret;
+      if (curDataSlice.remaining() == 0) {
+        // we're at EOF now
+        break;
+      }
+
+      int skip = (int)Math.min(curDataSlice.remaining(), needToSkip);
+      curDataSlice.position(curDataSlice.position() + skip);
+      skipped += skip;
     }
-    return nSkipped;
+    return skipped;
   }
 
   private void readTrailingEmptyPacket() throws IOException {
@@ -289,6 +301,7 @@ public class RemoteBlockReader2  implements BlockReader {
     this.startOffset = Math.max( startOffset, 0 );
     this.filename = file;
     this.peerCache = peerCache;
+    this.blockId = blockId;
 
     // The total number of bytes that we need to transfer from the DN is
     // the amount that the user wants (bytesToRead), plus the padding at
@@ -372,8 +385,6 @@ public class RemoteBlockReader2  implements BlockReader {
    * Create a new BlockReader specifically to satisfy a read.
    * This method also sends the OP_READ_BLOCK request.
    *
-   * @param sock  An established Socket to the DN. The BlockReader will not close it normally.
-   *             This socket must have an associated Channel.
    * @param file  File location
    * @param block  The block object
    * @param blockToken  The block token for security
@@ -433,22 +444,13 @@ public class RemoteBlockReader2  implements BlockReader {
       BlockOpResponseProto status, Peer peer,
       ExtendedBlock block, String file)
       throws IOException {
-    if (status.getStatus() != Status.SUCCESS) {
-      if (status.getStatus() == Status.ERROR_ACCESS_TOKEN) {
-        throw new InvalidBlockTokenException(
-            "Got access token error for OP_READ_BLOCK, self="
-                + peer.getLocalAddressString() + ", remote="
-                + peer.getRemoteAddressString() + ", for file " + file
-                + ", for pool " + block.getBlockPoolId() + " block " 
-                + block.getBlockId() + "_" + block.getGenerationStamp());
-      } else {
-        throw new IOException("Got error for OP_READ_BLOCK, self="
-            + peer.getLocalAddressString() + ", remote="
-            + peer.getRemoteAddressString() + ", for file " + file
-            + ", for pool " + block.getBlockPoolId() + " block " 
-            + block.getBlockId() + "_" + block.getGenerationStamp());
-      }
-    }
+    String logInfo = "for OP_READ_BLOCK"
+      + ", self=" + peer.getLocalAddressString()
+      + ", remote=" + peer.getRemoteAddressString()
+      + ", for file " + file
+      + ", for pool " + block.getBlockPoolId()
+      + " block " + block.getBlockId() + "_" + block.getGenerationStamp();
+    DataTransferProtoUtil.checkBlockOpStatus(status, logInfo);
   }
   
   @Override

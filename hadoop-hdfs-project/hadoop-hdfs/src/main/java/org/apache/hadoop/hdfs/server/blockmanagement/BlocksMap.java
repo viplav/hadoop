@@ -24,7 +24,6 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.util.GSet;
 import org.apache.hadoop.util.LightWeightGSet;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 
@@ -85,9 +84,13 @@ class BlocksMap {
 
 
   void close() {
+    clear();
+    blocks = null;
+  }
+  
+  void clear() {
     if (blocks != null) {
       blocks.clear();
-      blocks = null;
     }
   }
 
@@ -188,14 +191,18 @@ class BlocksMap {
     boolean removed = node.removeBlock(info);
 
     if (info.getDatanode(0) == null     // no datanodes left
-              && info.getBlockCollection() == null) {  // does not belong to a file
+              && info.isDeleted()) {  // does not belong to a file
       blocks.remove(b);  // remove block from the map
     }
     return removed;
   }
 
   int size() {
-    return blocks.size();
+    if (blocks != null) {
+      return blocks.size();
+    } else {
+      return 0;
+    }
   }
 
   Iterable<BlockInfo> getBlocks() {
@@ -217,15 +224,7 @@ class BlocksMap {
     BlockInfo currentBlock = blocks.get(newBlock);
     assert currentBlock != null : "the block if not in blocksMap";
     // replace block in data-node lists
-    for (int i = currentBlock.numNodes() - 1; i >= 0; i--) {
-      final DatanodeDescriptor dn = currentBlock.getDatanode(i);
-      final DatanodeStorageInfo storage = currentBlock.findStorageInfo(dn);
-      final boolean removed = storage.removeBlock(currentBlock);
-      Preconditions.checkState(removed, "currentBlock not found.");
-
-      final boolean added = storage.addBlock(newBlock);
-      Preconditions.checkState(added, "newBlock already exists.");
-    }
+    currentBlock.replaceBlock(newBlock);
     // replace block in the map itself
     blocks.put(newBlock);
     return newBlock;
